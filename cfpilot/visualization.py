@@ -264,7 +264,7 @@ class FlightDataPlotter:
             
             # Convert timestamp if exists
             if 'timestamp' in self.data.columns:
-                self.data['timestamp'] = pd.to_datetime(self.data['timestamp'])
+                self.data['timestamp'] = pd.to_datetime(self.data['timestamp'] - self.data['timestamp'].iloc[0], unit='ms')
                 self.data['time_elapsed'] = (self.data['timestamp'] - self.data['timestamp'].iloc[0]).dt.total_seconds()
             else:
                 # Create time index based on logging frequency

@@ -110,9 +110,8 @@ class CrazyflieController:
     def _connected(self, link_uri):
         """Called when Crazyflie is connected"""
         self.is_connected = True
-        self.logger.info(f"🔌 Connected to {link_uri}")
-        self._setup_crazyflie_params()
-        self._setup_logging_async()
+        self.logger.info(f"🔌 Connected to {link_uri} through callback")
+
     
     def _disconnected(self, link_uri):
         """Called when Crazyflie is disconnected"""
@@ -204,7 +203,7 @@ class CrazyflieController:
         self.latest_data.update(data)
         
         # Safety checks
-        self._check_battery_safety(data)
+        # self._check_battery_safety(data)
         
         # Landing detection if we have position
         if 'range.zrange' in self.latest_data:
@@ -297,6 +296,9 @@ class CrazyflieController:
         """Connect to Crazyflie"""
         self.logger.info(f"Connecting to {uri}")
         self.cf.open_link(uri)
+        self._setup_crazyflie_params()
+        self._setup_logging_async()
+
     
     def disconnect(self) -> None:
         """Disconnect from Crazyflie"""
