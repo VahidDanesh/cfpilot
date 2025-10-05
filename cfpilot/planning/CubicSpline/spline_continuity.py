@@ -1,4 +1,3 @@
-
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import interpolate
@@ -18,6 +17,16 @@ class Spline2D:
         return s
 
     def calc_position(self, s):
+        """
+        Calculate positions for array of s values.
+        
+        Args:
+            s: scalar or array-like of path parameter values
+            
+        Returns:
+            x, y: interpolated coordinates (scalars or arrays)
+        """
+        s = np.atleast_1d(s)
         x = self.sx(s)
         y = self.sy(s)
         return x, y
@@ -34,13 +43,9 @@ def main():
     for (kind, label) in [("linear", "C0 (Linear spline)"),
                           ("quadratic", "C0 & C1 (Quadratic spline)"),
                           ("cubic", "C0 & C1 & C2 (Cubic spline)")]:
-        rx, ry = [], []
         sp = Spline2D(x, y, kind=kind)
         s = np.arange(0, sp.s[-1], ds)
-        for i_s in s:
-            ix, iy = sp.calc_position(i_s)
-            rx.append(ix)
-            ry.append(iy)
+        rx, ry = sp.calc_position(s)  # Direct vectorized call
         plt.plot(rx, ry, "-", label=label)
 
     plt.grid(True)
