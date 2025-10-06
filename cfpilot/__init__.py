@@ -16,8 +16,7 @@ try:
     from .visualization import PointCloudPlotter
     __all__ = [
         "CrazyflieController", "LandingPadDetector", "SearchPattern",
-        "BasicFlightMission", "SensorExplorationMission", "LandingPadDetectionMission",
-        "PointCloudPlotter"
+        "BasicFlightMission", "SensorExplorationMission", "LandingPadDetectionMission"
     ]
 except ImportError:
     __all__ = [

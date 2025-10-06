@@ -149,22 +149,23 @@ class CrazyflieController:
         
         # Position logger
         self.lg_pos = LogConfig(name='Position', period_in_ms=period_ms)
-        self.lg_pos.add_variable('stateEstimate.x', 'float')
-        self.lg_pos.add_variable('stateEstimate.y', 'float')
-        self.lg_pos.add_variable('stateEstimate.z', 'float')
+        self.lg_pos.add_variable('stateEstimate.x')
+        self.lg_pos.add_variable('stateEstimate.y')
+        self.lg_pos.add_variable('stateEstimate.z')
+        self.lg_pos.add_variable('stabilizer.yaw')
+
         self.lg_pos.add_variable('pm.vbat', 'float')
         
         # Measurement logger
         self.lg_meas = LogConfig(name='Meas', period_in_ms=period_ms)
-        self.lg_meas.add_variable('stabilizer.roll', 'float')
-        self.lg_meas.add_variable('stabilizer.pitch', 'float')
-        self.lg_meas.add_variable('stabilizer.yaw', 'float')
-        self.lg_meas.add_variable('range.zrange', 'uint16_t')
-        self.lg_meas.add_variable('range.up', 'uint16_t')
-        self.lg_meas.add_variable('range.front', 'uint16_t')
-        self.lg_meas.add_variable('range.back', 'uint16_t') 
-        self.lg_meas.add_variable('range.left', 'uint16_t')
-        self.lg_meas.add_variable('range.right', 'uint16_t')
+        self.lg_meas.add_variable('stabilizer.roll')
+        self.lg_meas.add_variable('stabilizer.pitch')
+        self.lg_meas.add_variable('range.zrange')
+        self.lg_meas.add_variable('range.up')
+        self.lg_meas.add_variable('range.front')
+        self.lg_meas.add_variable('range.back') 
+        self.lg_meas.add_variable('range.left')
+        self.lg_meas.add_variable('range.right')
 
         try:
             self.cf.log.add_config(self.lg_pos)
@@ -212,7 +213,8 @@ class CrazyflieController:
             x = data.get('stateEstimate.x', 0)
             y = data.get('stateEstimate.y', 0)
             z = data.get('stateEstimate.z', 0)
-            self.landing_detector.process_height_measurement(height, (x, y, z))
+            yaw = data.get('stabilizer.yaw', 0)
+            # self.landing_detector.process_height_measurement(height, (x, y, z))
         
         # Update plotter position
         if self.plotter:
@@ -286,7 +288,7 @@ class CrazyflieController:
     
     def add_data_callback(self, callback: Callable[[int, Dict[str, Any], str], None]) -> None:
         """Add a data callback function"""
-        self.data_callbacks.append(callback)
+        self.data_callbacks.append(callback)    
     
     def remove_data_callback(self, callback: Callable[[int, Dict[str, Any], str], None]) -> None:
         """Remove a data callback function"""

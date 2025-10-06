@@ -17,228 +17,230 @@ from datetime import datetime
 import json
 
 
-try:
-    from vispy import scene
-    from vispy.scene import visuals
-    from vispy.scene.cameras import TurntableCamera
-    from PyQt5 import QtCore, QtWidgets
-    VISUALIZATION_AVAILABLE = True
-except ImportError:
-    VISUALIZATION_AVAILABLE = False
+# try:
+#     from vispy import scene
+#     from vispy.scene import visuals
+#     from vispy.scene.cameras import TurntableCamera
+#     from PyQt5 import QtCore, QtWidgets
+#     VISUALIZATION_AVAILABLE = True
+#     print("✅ Visualization dependencies available")
+# except ImportError:
+#     VISUALIZATION_AVAILABLE = False
+#     print("❌ Visualization dependencies not available")
 
 
-class PointCloudPlotter:
-    """Real-time 3D point cloud plotter for multiranger sensor data"""
+# class PointCloudPlotter:
+#     """Real-time 3D point cloud plotter for multiranger sensor data"""
     
-    def __init__(self, sensor_threshold: int = 2000):
-        if not VISUALIZATION_AVAILABLE:
-            raise ImportError("Visualization dependencies not available. Install with: pip install vispy PyQt5")
+#     def __init__(self, sensor_threshold: int = 2000):
+#         if not VISUALIZATION_AVAILABLE:
+#             raise ImportError("Visualization dependencies not available. Install with: pip install vispy PyQt5")
         
-        self.logger = logging.getLogger(__name__)
-        self.sensor_threshold = sensor_threshold
-        self.running = False
-        self.app = None
-        self.window = None
-        self.canvas = None
-        self.owns_app = False
-        self.thread = None
+#         self.logger = logging.getLogger(__name__)
+#         self.sensor_threshold = sensor_threshold
+#         self.running = False
+#         self.app = None
+#         self.window = None
+#         self.canvas = None
+#         self.owns_app = False
+#         self.thread = None
         
-        # Data storage
-        self.last_position = [0, 0, 0]
-        self.position_data = np.array([0, 0, 0], ndmin=2)
-        self.measurement_data = np.array([0, 0, 0], ndmin=2)
+#         # Data storage
+#         self.last_position = [0, 0, 0]
+#         self.position_data = np.array([0, 0, 0], ndmin=2)
+#         self.measurement_data = np.array([0, 0, 0], ndmin=2)
     
-    def start(self) -> None:
-        """Start the visualization with simple window creation"""
-        if self.running:
-            return
+#     def start(self) -> None:
+#         """Start the visualization with simple window creation"""
+#         if self.running:
+#             return
         
-        try:
-            # Import Qt in the main thread
-            from PyQt5 import QtWidgets
+#         try:
+#             # Import Qt in the main thread
+#             from PyQt5 import QtWidgets
             
-            # Check if QApplication already exists
-            app = QtWidgets.QApplication.instance()
-            if app is None:
-                # Create QApplication but don't run exec_()
-                self.app = QtWidgets.QApplication([])
-                self.owns_app = True
-            else:
-                self.app = app
-                self.owns_app = False
+#             # Check if QApplication already exists
+#             app = QtWidgets.QApplication.instance()
+#             if app is None:
+#                 # Create QApplication but don't run exec_()
+#                 self.app = QtWidgets.QApplication([])
+#                 self.owns_app = True
+#             else:
+#                 self.app = app
+#                 self.owns_app = False
             
-            # Create and show window
-            self.window = VisualizationWindow(self.sensor_threshold)
-            self.canvas = self.window.canvas
-            self.window.show()
+#             # Create and show window
+#             self.window = VisualizationWindow(self.sensor_threshold)
+#             self.canvas = self.window.canvas
+#             self.window.show()
             
-            # Force window to appear by processing events once
-            self.app.processEvents()
+#             # Force window to appear by processing events once
+#             self.app.processEvents()
             
-            self.running = True
-            self.logger.info("Point cloud plotter window created")
+#             self.running = True
+#             self.logger.info("Point cloud plotter window created")
             
-        except Exception as e:
-            self.logger.error(f"Visualization error: {e}")
-            self.running = False
+#         except Exception as e:
+#             self.logger.error(f"Visualization error: {e}")
+#             self.running = False
     
-    def stop(self) -> None:
-        """Stop the visualization"""
-        if not self.running:
-            return
+#     def stop(self) -> None:
+#         """Stop the visualization"""
+#         if not self.running:
+#             return
         
-        self.running = False
-        if self.window:
-            self.window.close()
-        if self.app and self.owns_app:
-            self.app.quit()
-        self.logger.info("Point cloud plotter stopped")
+#         self.running = False
+#         if self.window:
+#             self.window.close()
+#         if self.app and self.owns_app:
+#             self.app.quit()
+#         self.logger.info("Point cloud plotter stopped")
     
-    def update_position(self, x: float, y: float, z: float) -> None:
-        """Update drone position"""
-        if not self.running or not self.canvas:
-            return
+#     def update_position(self, x: float, y: float, z: float) -> None:
+#         """Update drone position"""
+#         if not self.running or not self.canvas:
+#             return
         
-        self.last_position = [x, y, z]
-        if hasattr(self.canvas, 'set_position'):
-            self.canvas.set_position([x, y, z])
+#         self.last_position = [x, y, z]
+#         if hasattr(self.canvas, 'set_position'):
+#             self.canvas.set_position([x, y, z])
         
-        # Process Qt events to update the display
-        if self.app:
-            self.app.processEvents()
+#         # Process Qt events to update the display
+#         if self.app:
+#             self.app.processEvents()
     
-    def update_sensors(self, measurements: Dict[str, float]) -> None:
-        """Update sensor measurements"""
-        if not self.running or not self.canvas:
-            return
+#     def update_sensors(self, measurements: Dict[str, float]) -> None:
+#         """Update sensor measurements"""
+#         if not self.running or not self.canvas:
+#             return
         
-        if hasattr(self.canvas, 'set_measurement'):
-            self.canvas.set_measurement(measurements)
+#         if hasattr(self.canvas, 'set_measurement'):
+#             self.canvas.set_measurement(measurements)
         
-        # Process Qt events to update the display
-        if self.app:
-            self.app.processEvents()
+#         # Process Qt events to update the display
+#         if self.app:
+#             self.app.processEvents()
     
-    def process_events(self) -> None:
-        """Process Qt events to keep window responsive"""
-        if self.app and self.running:
-            self.app.processEvents()
+#     def process_events(self) -> None:
+#         """Process Qt events to keep window responsive"""
+#         if self.app and self.running:
+#             self.app.processEvents()
     
 
 
-class VisualizationWindow(QtWidgets.QMainWindow):
-    """Qt window for 3D visualization"""
+# class VisualizationWindow(QtWidgets.QMainWindow):
+#     """Qt window for 3D visualization"""
     
-    def __init__(self, sensor_threshold: int):
-        super().__init__()
-        self.resize(700, 500)
-        self.setWindowTitle('CFPilot - Multiranger Point Cloud')
+#     def __init__(self, sensor_threshold: int):
+#         super().__init__()
+#         self.resize(700, 500)
+#         self.setWindowTitle('CFPilot - Multiranger Point Cloud')
         
-        self.canvas = VisualizationCanvas(sensor_threshold)
-        self.canvas.create_native()
-        self.canvas.native.setParent(self)
-        self.setCentralWidget(self.canvas.native)
+#         self.canvas = VisualizationCanvas(sensor_threshold)
+#         self.canvas.create_native()
+#         self.canvas.native.setParent(self)
+#         self.setCentralWidget(self.canvas.native)
 
 
-class VisualizationCanvas(scene.SceneCanvas):
-    """3D visualization canvas"""
+# class VisualizationCanvas(scene.SceneCanvas):
+#     """3D visualization canvas"""
     
-    def __init__(self, sensor_threshold: int):
-        super().__init__(keys=None)
-        self.unfreeze()
-        self.sensor_threshold = sensor_threshold
-        self.size = 800, 600
-        self.view = self.central_widget.add_view()
-        self.view.bgcolor = '#ffffff'
-        self.view.camera = TurntableCamera(fov=10.0, distance=30.0, up='+z', center=(0.0, 0.0, 0.0))
+#     def __init__(self, sensor_threshold: int):
+#         super().__init__(keys=None)
+#         self.unfreeze()
+#         self.sensor_threshold = sensor_threshold
+#         self.size = 800, 600
+#         self.view = self.central_widget.add_view()
+#         self.view.bgcolor = '#ffffff'
+#         self.view.camera = TurntableCamera(fov=10.0, distance=30.0, up='+z', center=(0.0, 0.0, 0.0))
         
-        # Data arrays
-        self.last_pos = [0, 0, 0]
-        self.pos_data = np.array([0, 0, 0], ndmin=2)
-        self.meas_data = np.array([0, 0, 0], ndmin=2)
+#         # Data arrays
+#         self.last_pos = [0, 0, 0]
+#         self.pos_data = np.array([0, 0, 0], ndmin=2)
+#         self.meas_data = np.array([0, 0, 0], ndmin=2)
         
-        # Visual elements
-        self.pos_markers = visuals.Markers()
-        self.meas_markers = visuals.Markers()
-        self.lines = [visuals.Line() for _ in range(6)]
+#         # Visual elements
+#         self.pos_markers = visuals.Markers()
+#         self.meas_markers = visuals.Markers()
+#         self.lines = [visuals.Line() for _ in range(6)]
         
-        # Add to scene
-        self.view.add(self.pos_markers)
-        self.view.add(self.meas_markers)
-        for line in self.lines:
-            self.view.add(line)
+#         # Add to scene
+#         self.view.add(self.pos_markers)
+#         self.view.add(self.meas_markers)
+#         for line in self.lines:
+#             self.view.add(line)
         
-        scene.visuals.XYZAxis(parent=self.view.scene)
-        self.freeze()
+#         scene.visuals.XYZAxis(parent=self.view.scene)
+#         self.freeze()
     
-    def set_position(self, pos: List[float]) -> None:
-        """Set drone position"""
-        self.last_pos = pos
-        self.pos_data = np.append(self.pos_data, [pos], axis=0)
-        self.pos_markers.set_data(self.pos_data, face_color='red', size=5)
+#     def set_position(self, pos: List[float]) -> None:
+#         """Set drone position"""
+#         self.last_pos = pos
+#         self.pos_data = np.append(self.pos_data, [pos], axis=0)
+#         self.pos_markers.set_data(self.pos_data, face_color='red', size=5)
     
-    def set_measurement(self, measurements: Dict[str, float]) -> None:
-        """Set sensor measurements"""
-        data = self._create_sensor_points(measurements)
+#     def set_measurement(self, measurements: Dict[str, float]) -> None:
+#         """Set sensor measurements"""
+#         data = self._create_sensor_points(measurements)
         
-        # Update lines
-        for i, line in enumerate(self.lines):
-            if i < len(data):
-                line.set_data(np.array([self.last_pos, data[i]]))
-            else:
-                line.set_data(np.array([self.last_pos, self.last_pos]))
+#         # Update lines
+#         for i, line in enumerate(self.lines):
+#             if i < len(data):
+#                 line.set_data(np.array([self.last_pos, data[i]]))
+#             else:
+#                 line.set_data(np.array([self.last_pos, self.last_pos]))
         
-        # Update measurement points
-        if data:
-            self.meas_data = np.append(self.meas_data, data, axis=0)
-        self.meas_markers.set_data(self.meas_data, face_color='blue', size=5)
+#         # Update measurement points
+#         if data:
+#             self.meas_data = np.append(self.meas_data, data, axis=0)
+#         self.meas_markers.set_data(self.meas_data, face_color='blue', size=5)
     
-    def _create_sensor_points(self, m: Dict[str, float]) -> List[List[float]]:
-        """Create 3D points from sensor measurements"""
-        data = []
-        o = self.last_pos
-        roll, pitch, yaw = m.get('roll', 0), -m.get('pitch', 0), m.get('yaw', 0)
+#     def _create_sensor_points(self, m: Dict[str, float]) -> List[List[float]]:
+#         """Create 3D points from sensor measurements"""
+#         data = []
+#         o = self.last_pos
+#         roll, pitch, yaw = m.get('roll', 0), -m.get('pitch', 0), m.get('yaw', 0)
         
-        # Check each sensor direction
-        sensors = [
-            ('up', [o[0], o[1], o[2] + m.get('up', 8000) / 1000.0]),
-            ('down', [o[0], o[1], o[2] - m.get('down', 8000) / 1000.0]),
-            ('left', [o[0], o[1] + m.get('left', 8000) / 1000.0, o[2]]),
-            ('right', [o[0], o[1] - m.get('right', 8000) / 1000.0, o[2]]),
-            ('front', [o[0] + m.get('front', 8000) / 1000.0, o[1], o[2]]),
-            ('back', [o[0] - m.get('back', 8000) / 1000.0, o[1], o[2]])
-        ]
+#         # Check each sensor direction
+#         sensors = [
+#             ('up', [o[0], o[1], o[2] + m.get('up', 8000) / 1000.0]),
+#             ('down', [o[0], o[1], o[2] - m.get('down', 8000) / 1000.0]),
+#             ('left', [o[0], o[1] + m.get('left', 8000) / 1000.0, o[2]]),
+#             ('right', [o[0], o[1] - m.get('right', 8000) / 1000.0, o[2]]),
+#             ('front', [o[0] + m.get('front', 8000) / 1000.0, o[1], o[2]]),
+#             ('back', [o[0] - m.get('back', 8000) / 1000.0, o[1], o[2]])
+#         ]
         
-        for direction, point in sensors:
-            distance = m.get(direction, 8000)
-            if distance < self.sensor_threshold:
-                rotated_point = self._rotate_point(roll, pitch, yaw, o, point)
-                data.append(rotated_point)
+#         for direction, point in sensors:
+#             distance = m.get(direction, 8000)
+#             if distance < self.sensor_threshold:
+#                 rotated_point = self._rotate_point(roll, pitch, yaw, o, point)
+#                 data.append(rotated_point)
         
-        return data
+#         return data
     
-    def _rotate_point(self, roll: float, pitch: float, yaw: float, 
-                     origin: List[float], point: List[float]) -> List[float]:
-        """Rotate point around origin"""
-        # Convert to radians
-        r, p, y = map(math.radians, [roll, pitch, yaw])
+#     def _rotate_point(self, roll: float, pitch: float, yaw: float, 
+#                      origin: List[float], point: List[float]) -> List[float]:
+#         """Rotate point around origin"""
+#         # Convert to radians
+#         r, p, y = map(math.radians, [roll, pitch, yaw])
         
-        # Rotation matrices
-        cos_r, sin_r = math.cos(r), math.sin(r)
-        cos_p, sin_p = math.cos(p), math.sin(p)
-        cos_y, sin_y = math.cos(y), math.sin(y)
+#         # Rotation matrices
+#         cos_r, sin_r = math.cos(r), math.sin(r)
+#         cos_p, sin_p = math.cos(p), math.sin(p)
+#         cos_y, sin_y = math.cos(y), math.sin(y)
         
-        rot_y = np.array([[cos_y, -sin_y, 0], [sin_y, cos_y, 0], [0, 0, 1]])
-        rot_p = np.array([[cos_p, 0, sin_p], [0, 1, 0], [-sin_p, 0, cos_p]])
-        rot_r = np.array([[1, 0, 0], [0, cos_r, -sin_r], [0, sin_r, cos_r]])
+#         rot_y = np.array([[cos_y, -sin_y, 0], [sin_y, cos_y, 0], [0, 0, 1]])
+#         rot_p = np.array([[cos_p, 0, sin_p], [0, 1, 0], [-sin_p, 0, cos_p]])
+#         rot_r = np.array([[1, 0, 0], [0, cos_r, -sin_r], [0, sin_r, cos_r]])
         
-        # Combined rotation
-        rot_matrix = np.dot(np.dot(rot_r, rot_p), rot_y)
+#         # Combined rotation
+#         rot_matrix = np.dot(np.dot(rot_r, rot_p), rot_y)
         
-        # Apply rotation
-        point_relative = np.subtract(point, origin)
-        rotated_relative = np.dot(rot_matrix, point_relative)
-        return np.add(rotated_relative, origin).tolist()
+#         # Apply rotation
+#         point_relative = np.subtract(point, origin)
+#         rotated_relative = np.dot(rot_matrix, point_relative)
+#         return np.add(rotated_relative, origin).tolist()
 
 
 #!/usr/bin/env python3
