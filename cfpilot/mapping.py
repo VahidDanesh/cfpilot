@@ -255,6 +255,33 @@ class GridMap:
         self.data[:, :boundary_width] = val  # Left
         self.data[:, -boundary_width:] = val  # Right
 
+
+    def simplify_path(self, pathx, pathy, obstacle_threshold=0.5):
+        """Remove unnecessary waypoints - keep only points where path must turn"""
+        
+        if len(pathx) <= 2:
+            return pathx, pathy
+        
+        def line_clear(i, j):
+            """Check if straight line between two points is obstacle-free"""
+            n = int(np.hypot(pathx[j]-pathx[i], pathy[j]-pathy[i])) * 2 + 1
+            xs = np.linspace(pathx[i], pathx[j], n).astype(int)
+            ys = np.linspace(pathy[i], pathy[j], n).astype(int)
+            return np.all(self.data[xs, ys] <= obstacle_threshold)
+        
+        result = [0]  # Keep start
+        i = 0
+        
+        while i < len(pathx) - 1:
+            # Skip ahead as far as possible
+            j = len(pathx) - 1
+            while j > i and not line_clear(i, j):
+                j -= 1
+            result.append(j)
+            i = j
+        
+        return [pathx[k] for k in result], [pathy[k] for k in result]
+
     @staticmethod
     def check_inside_polygon(iox, ioy, x, y):
 

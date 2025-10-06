@@ -127,13 +127,14 @@ class CrazyflieController:
         """Called when connection is lost"""
         self.logger.warning(f"❌ Connection to {link_uri} lost: {msg}")
         self.is_connected = False
-    
-    def _setup_crazyflie_params(self) -> None:
+
+    def _setup_crazyflie_params(self, x: float=0.0, y: float=0.0, z: float=0.0, yaw: float=0.0) -> None:
         """Setup Crazyflie parameters"""
         # Reset estimator
-        self.cf.param.set_value('kalman.initialX', '0')
-        self.cf.param.set_value('kalman.initialY', '0') 
-        self.cf.param.set_value('kalman.initialZ', '0')
+        self.cf.param.set_value('kalman.initialX', x)
+        self.cf.param.set_value('kalman.initialY', y) 
+        self.cf.param.set_value('kalman.initialZ', z)
+        self.cf.param.set_value('kalman.initialYaw', yaw)
         self.cf.param.set_value('kalman.resetEstimation', '1')
         time.sleep(0.1)
         self.cf.param.set_value('kalman.resetEstimation', '0')
@@ -291,12 +292,12 @@ class CrazyflieController:
         """Remove a data callback function"""
         if callback in self.data_callbacks:
             self.data_callbacks.remove(callback)
-    
-    def connect(self, uri: str) -> None:
+
+    def connect(self, uri: str, x: float=0.0, y: float=0.0, z: float=0.0, yaw: float=0.0) -> None:
         """Connect to Crazyflie"""
         self.logger.info(f"Connecting to {uri}")
         self.cf.open_link(uri)
-        self._setup_crazyflie_params()
+        self._setup_crazyflie_params(x, y, z, yaw)
         self._setup_logging_async()
 
     
