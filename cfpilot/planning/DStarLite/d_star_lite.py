@@ -14,6 +14,7 @@ dynamic replanning when obstacles are detected.
 import math
 import sys
 import os
+from typing import overload
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import interpolate
@@ -389,6 +390,21 @@ class DStarLite:
                                                   self.g[sprime.x][sprime.y])
         path.append(self.goal)
         return path
+    
+    def path_to_world_coords(self, node_path: list):
+        """
+        Convert a path of Nodes (grid indices) to world coordinates.
+        
+        :param node_path: list of Nodes with grid indices
+        :return: tuple of (pathx, pathy) arrays in world coordinates
+        """
+        pathx = []
+        pathy = []
+        for node in node_path:
+            x_world, y_world = self.grid_to_world(node.x, node.y)
+            pathx.append(x_world)
+            pathy.append(y_world)
+        return np.array(pathx), np.array(pathy)
 
     def compare_paths(self, path1: list, path2: list):
         """Check if two paths are identical"""
@@ -396,16 +412,30 @@ class DStarLite:
             return False
         return all(compare_coordinates(n1, n2) for n1, n2 in zip(path1, path2))
 
-    def plot_path(self, pathx, pathy, color: str = 'b', alpha: float = 0.7):
+    def plot_path(self, path, color: str = 'b', alpha: float = 0.7):
         """
         Display a path on the plot.
         
-        :param pathx: x coordinates of path (world coordinates)
-        :param pathy: y coordinates of path (world coordinates)
-        :param colour: color for the path
-        :param alpha: transparency (0-1)
-        :return: plot handle
+        Accepts multiple input formats for flexibility:
+        - List of Nodes (grid indices) - will be converted to world coords
+        - Tuple of (pathx, pathy) arrays/lists in world coordinates
+        
+        :param path: Either a list of Nodes OR tuple of (pathx, pathy) in world coords
+        :param color: matplotlib color string (default 'b' for blue)
+        :param alpha: transparency from 0 (transparent) to 1 (opaque)
+        :return: matplotlib plot handle
         """
+        # Check if path is a tuple of (pathx, pathy) - world coordinates
+        if isinstance(path, tuple) and len(path) == 2:
+            pathx, pathy = path
+        # Otherwise assume it's a list of Nodes - convert to world coords
+        elif isinstance(path, list) and len(path) > 0 and isinstance(path[0], Node):
+            pathx, pathy = self.path_to_world_coords(path)
+        else:
+            raise ValueError(
+                "path must be either a list of Nodes or tuple of (pathx, pathy) arrays"
+            )
+        
         drawing = plt.plot(pathx, pathy, color, alpha=alpha)
         plt.pause(pause_time)
         return drawing
@@ -528,8 +558,8 @@ class DStarLite:
         if self.show_animation:
             current_path = self.compute_current_path()
             previous_path = current_path.copy()
-            previous_path_image = self.display_path(previous_path, ".c", alpha=0.3)
-            current_path_image = self.display_path(current_path, ".c")
+            previous_path_image = self.plot_path(previous_path, ".c", alpha=0.3)
+            current_path_image = self.plot_path(current_path, ".c")
 
         # Execute path with replanning
         while not compare_coordinates(self.goal, self.start):
@@ -564,8 +594,8 @@ class DStarLite:
                             previous_path_image[0].remove()
                             previous_path = current_path.copy()
                             current_path = new_path.copy()
-                            previous_path_image = self.display_path(previous_path, ".c", alpha=0.3)
-                            current_path_image = self.display_path(current_path, ".c")
+                            previous_path_image = self.plot_path(previous_path, ".c", alpha=0.3)
+                            current_path_image = self.plot_path(current_path, ".c")
             else:
                 # Auto-detect changes from GridMap
                 changed_vertices = self.detect_changes()
@@ -587,8 +617,8 @@ class DStarLite:
                             previous_path_image[0].remove()
                             previous_path = current_path.copy()
                             current_path = new_path.copy()
-                            previous_path_image = self.display_path(previous_path, ".c", alpha=0.3)
-                            current_path_image = self.display_path(current_path, ".c")
+                            previous_path_image = self.plot_path(previous_path, ".c", alpha=0.3)
+                            current_path_image = self.plot_path(current_path, ".c")
                             plt.pause(pause_time)
         
         print("Path found")
@@ -784,7 +814,7 @@ def simple_demo():
 
 if __name__ == "__main__":
     # Run the main demo with dynamic replanning
-    # main()
+    main()
     
     # Uncomment to run the simple demo instead
-    simple_demo()
+    # simple_demo()
