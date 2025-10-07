@@ -2,7 +2,6 @@
 Path Planning & Obstacle Avoidance Module - Streamlined Version
 
 Simple, composable functions for Crazyflie navigation with real-time obstacle avoidance.
-No classes needed - just pure functions that work together.
 """
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,6 +9,7 @@ from typing import Tuple, List, Optional, Dict
 from cflib.utils.multiranger import Multiranger
 
 from cfpilot.mapping import GridMap
+from cfpilot.sensors import SensorFilter, read_multiranger_raw, get_min_distance
 from cfpilot.planning.DStarLite.d_star_lite import DStarLite, Node
 from cfpilot.planning.CubicSpline.spline_continuity import Spline2D
 
@@ -76,7 +76,7 @@ def plan_path(grid_map: GridMap,
     
     # Simplify
     if simplify:
-        pathx, pathy = _simplify_path(pathx, pathy, grid_map)
+        pathx, pathy = GridMap.simplify_path(pathx, pathy, grid_map)
     
     # Convert to world coordinates
     pos_x, pos_y = grid_map.get_xy_poss_from_xy_indexes(pathx, pathy)
@@ -84,86 +84,18 @@ def plan_path(grid_map: GridMap,
     return list(pos_x), list(pos_y)
 
 
-def _simplify_path(pathx: List[int], pathy: List[int], 
-                   grid_map: GridMap) -> Tuple[List[int], List[int]]:
-    """Remove unnecessary waypoints using line-of-sight"""
-    if len(pathx) <= 2:
-        return pathx, pathy
-    
-    def line_clear(i: int, j: int) -> bool:
-        n = int(np.hypot(pathx[j] - pathx[i], pathy[j] - pathy[i])) * 2 + 1
-        xs = np.linspace(pathx[i], pathx[j], n).astype(int)
-        ys = np.linspace(pathy[i], pathy[j], n).astype(int)
-        return np.all(grid_map.data[xs, ys] <= 0.5)
-    
-    result = [0]
-    i = 0
-    while i < len(pathx) - 1:
-        j = len(pathx) - 1
-        while j > i and not line_clear(i, j):
-            j -= 1
-        result.append(j)
-        i = j
-    
-    return [pathx[k] for k in result], [pathy[k] for k in result]
-
-
-def smooth_path(waypoints_x: List[float], waypoints_y: List[float],
-                ds: float = 0.05) -> Tuple[List[float], List[float]]:
-    """Smooth path using cubic splines"""
-    if len(waypoints_x) < 3:
-        return waypoints_x, waypoints_y
-    
-    sp = Spline2D(waypoints_x, waypoints_y, kind='cubic')
-    s = np.arange(0, sp.s[-1], ds)
-    rx, ry = sp.calc_position(s)
-    return list(rx), list(ry)
-
-
 # ============================================================================
-# Sensor Utilities
+# Obstacle Avoidance - Potential Field with Filtered Sensors
 # ============================================================================
 
-def read_multiranger(multiranger: Multiranger) -> Dict[str, Optional[float]]:
-    """
-    Read multiranger sensors and convert to meters
-    
-    Args:
-        multiranger: Multiranger object
-        max_valid: Maximum valid range in meters
-        
-    Returns:
-        Dictionary with sensor distances in meters (None if invalid/out-of-range)
-    """
-    
-    return {
-        'front': multiranger.front,
-        'back': multiranger.back,
-        'left': multiranger.left,
-        'right': multiranger.right,
-        'up': multiranger.up,
-        'down': multiranger.down
-    }
-
-
-def get_min_distance(sensors: Dict[str, Optional[float]]) -> float:
-    """Get minimum valid sensor distance"""
-    valid = [d for d in sensors.values() if d is not None]
-    return min(valid) if valid else float('inf')
-
-
-# ============================================================================
-# Obstacle Avoidance - Simple Potential Field
-# ============================================================================
-
-def calculate_repulsion(multiranger: Multiranger, 
+def calculate_repulsion(filtered_readings: Dict[str, Optional[float]], 
                        yaw: float,
                        danger_dist: float = 0.5) -> Tuple[float, float, bool]:
     """
-    Calculate repulsion vector from obstacles
+    Calculate repulsion vector from obstacles using filtered sensor data
     
     Args:
-        sensors: Dict with sensor distances in meters
+        filtered_readings: Dict with filtered sensor distances in meters
         yaw: Current yaw in radians
         danger_dist: Distance threshold for repulsion
         
@@ -175,26 +107,70 @@ def calculate_repulsion(multiranger: Multiranger,
     
     repulsion_x, repulsion_y = 0.0, 0.0
     emergency = False
-    sensors = read_multiranger(multiranger)
+    
+    for direction in ['front', 'back', 'left', 'right']:
+        dist = filtered_readings.get(direction)
+        if dist is None or dist > danger_dist:
+            continue
+        
+        # Emergency stop if too close
+        if dist < 0.15:  # 15cm emergency threshold
+            emergency = True
+        
+        # Calculate repulsion (inverse square for stronger force when close)
+        force = (danger_dist - dist) / danger_dist
+        force = force ** 2  # Quadratic falloff
+        
+        # Direction in world frame (away from obstacle)
+        angle = yaw + angles[direction] + np.pi  # +π to point away
+        
+        repulsion_x += force * np.cos(angle)
+        repulsion_y += force * np.sin(angle)
+    
+    # Apply small deadzone to avoid jitter
+    if abs(repulsion_x) < 0.01:
+        repulsion_x = 0.0
+    if abs(repulsion_y) < 0.01:
+        repulsion_y = 0.0
+    
+    return repulsion_x, repulsion_y, emergency
+
+
+def calculate_repulsion_legacy(multiranger: Multiranger, 
+                               yaw: float,
+                               danger_dist: float = 0.5) -> Tuple[float, float, bool]:
+    """
+    DEPRECATED: Use calculate_repulsion() with filtered readings instead
+    
+    Calculate repulsion vector from raw multiranger data
+    """
+    angles = {'front': 0.0, 'right': -np.pi/2, 'back': np.pi, 'left': np.pi/2}
+    
+    repulsion_x, repulsion_y = 0.0, 0.0
+    emergency = False
+    sensors = read_multiranger_raw(multiranger)
+    
     for direction in ['front', 'back', 'left', 'right']:
         dist = sensors.get(direction)
         if dist is None or dist > danger_dist:
             continue
         
-        # Emergency stop if too close
-        if dist < 0.05:
+        if dist < 0.15:
             emergency = True
         
-        # Calculate repulsion (inverse square)
         force = (danger_dist - dist) / danger_dist
-        force = force ** 2  # Quadratic
+        force = force ** 2
         
-        # Direction in world frame (away from obstacle)
-        angle = yaw + angles[direction] + np.pi  # +π to point away
-        print(f"  Obstacle {direction} at {dist:.2f}m, force={force:.2f}")
+        angle = yaw + angles[direction] + np.pi
+        
         repulsion_x += force * np.cos(angle)
         repulsion_y += force * np.sin(angle)
     
+    if abs(repulsion_x) < 0.01:
+        repulsion_x = 0.0
+    if abs(repulsion_y) < 0.01:
+        repulsion_y = 0.0
+        
     return repulsion_x, repulsion_y, emergency
 
 
@@ -365,7 +341,6 @@ def fly_with_avoidance(position_commander,
     waypoints = list(zip(waypoints_x, waypoints_y))
     print(f"✅ Path planned with {len(waypoints)} waypoints")
     
-    # State
     current_idx = 0
     history = {}
     update_count = 0
@@ -374,11 +349,9 @@ def fly_with_avoidance(position_commander,
     start_time = time.time()
     
     while current_idx < len(waypoints) and time.time() - start_time < max_time:
-        # Get current state
         x, y, z, yaw = get_state_fn()
         
-        # Read sensors
-        sensors = read_multiranger(multiranger)
+        sensors = read_multiranger_raw(multiranger)
         min_dist = get_min_distance(sensors)
         
         # Target waypoint
@@ -485,16 +458,14 @@ def visualize_path(grid_map: GridMap,
 
 
 # ============================================================================
-# Example Usage
+# Example Usage with Sensor Filtering
 # ============================================================================
 
 if __name__ == "__main__":
-    # Create environment
     grid_map = create_test_environment()
     start = (0.7, 1.3)
     goal = (3.9, 1.0)
     
-    # Plan path
     waypoints_x, waypoints_y = plan_path(grid_map, start, goal)
     waypoints = list(zip(waypoints_x, waypoints_y))
     
@@ -502,5 +473,4 @@ if __name__ == "__main__":
     print(f"   Start: {start}")
     print(f"   Goal: {goal}")
     
-    # Visualize
     visualize_path(grid_map, start, goal, waypoints)
