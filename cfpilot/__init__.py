@@ -8,9 +8,12 @@ safety features, obstacle avoidance, and landing pad detection capabilities.
 __version__ = "1.0.0"
 __author__ = "Crazyflie Autonomous Team"
 
+from .mapping import GridMap
 from .controller import CrazyflieController
-from .detection import LandingPadDetector, SearchPattern
+from .detection import LandingPadDetector
 from .missions import BasicFlightMission, SensorExplorationMission, LandingPadDetectionMission
+from .visualization import FlightDataPlotter
+from .sensors import SensorFilter, read_multiranger_raw, get_min_distance
 
 try:
     from .visualization import PointCloudPlotter
