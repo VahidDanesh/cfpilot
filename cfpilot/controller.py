@@ -148,53 +148,24 @@ class CrazyflieController:
         period_ms = self.config['logging']['period_ms']
         
         # Position logger
-        self.lg_pos = LogConfig(name='Position', period_in_ms=period_ms)
-        self.lg_pos.add_variable('stateEstimate.x')
-        self.lg_pos.add_variable('stateEstimate.y')
-        self.lg_pos.add_variable('stateEstimate.z')
-        self.lg_pos.add_variable('stabilizer.yaw')
-
-        self.lg_pos.add_variable('pm.vbat', 'float')
-        
-        # Measurement logger
-        self.lg_meas = LogConfig(name='Meas', period_in_ms=period_ms)
-        self.lg_meas.add_variable('stabilizer.roll')
-        self.lg_meas.add_variable('stabilizer.pitch')
-        self.lg_meas.add_variable('range.zrange')
-        self.lg_meas.add_variable('range.up')
-        self.lg_meas.add_variable('range.front')
-        self.lg_meas.add_variable('range.back') 
-        self.lg_meas.add_variable('range.left')
-        self.lg_meas.add_variable('range.right')
+        self.lg = LogConfig(name='State', period_in_ms=period_ms)
+        self.lg.add_variable('stateEstimate.x', 'float')
+        self.lg.add_variable('stateEstimate.y', 'float')
+        self.lg.add_variable('stateEstimate.z', 'float')
+        self.lg.add_variable('stabilizer.yaw', 'float')
+        self.lg.add_variable('stabilizer.roll', 'float')
+        self.lg.add_variable('stabilizer.pitch', 'float')
+        self.lg.add_variable('pm.vbat', 'float')
 
         try:
-            self.cf.log.add_config(self.lg_pos)
-            self.lg_pos.data_received_cb.add_callback(self._pos_data_callback)
-            self.lg_pos.error_cb.add_callback(self._log_error_callback)
-
-            self.lg_pos.start()
+            self.cf.log.add_config(self.lg)
+            self.lg.data_received_cb.add_callback(self._pos_data_callback)
+            self.lg.error_cb.add_callback(self._log_error_callback)
+            self.lg.start()
         except KeyError as e:
             self.logger.error(f"Could not start log configuration: {e}")
         except AttributeError:
             self.logger.error("Could not add Position log config, bad configuration.")
-
-
-
-        try:
-            self.cf.log.add_config(self.lg_meas)
-            self.lg_meas.data_received_cb.add_callback(self._meas_data_callback)
-            self.lg_meas.error_cb.add_callback(self._log_error_callback)
-
-            self.lg_meas.start()
-        except KeyError as e:
-            self.logger.error(f"Could not start log configuration: {e}")
-        except AttributeError:
-            self.logger.error("Could not add Measurement log config, bad configuration.")
-
-
-        
-        # Add to Crazyflie and start
-        
         
         self.logger.info("✅ Async logging started.")
     
@@ -207,18 +178,12 @@ class CrazyflieController:
         # Safety checks
         # self._check_battery_safety(data)
         
-        # Landing detection if we have position
-        if 'range.zrange' in self.latest_data:
-            height = self.latest_data.get('range.zrange', 8000)
-            x = data.get('stateEstimate.x', 0)
-            y = data.get('stateEstimate.y', 0)
-            z = data.get('stateEstimate.z', 0)
-            yaw = data.get('stabilizer.yaw', 0)
-            # self.landing_detector.process_height_measurement(height, (x, y, z))
-        
-        # Update plotter position
-        if self.plotter:
-            self._update_plotter_position(data)
+
+        x = data.get('stateEstimate.x', 0)
+        y = data.get('stateEstimate.y', 0)
+        z = data.get('stateEstimate.z', 0)
+        yaw = data.get('stabilizer.yaw', 0)
+
         
         # Call user callbacks
         for callback in self.data_callbacks:
@@ -227,58 +192,27 @@ class CrazyflieController:
             except Exception as e:
                 self.logger.error(f"Error in pos callback: {e}")
     
-    def _meas_data_callback(self, timestamp, data, logconf_name):
-        """Callback for measurement data"""
-        self.latest_data.update(data)
-        self.flight_data.append(self.latest_data.copy())
+    # def _meas_data_callback(self, timestamp, data, logconf_name):
+    #     """Callback for measurement data"""
+    #     self.latest_data.update(data)
+    #     self.flight_data.append(self.latest_data.copy())
         
         
-        # Update plotter sensors
-        if self.plotter:
-            self._update_plotter_sensors(data)
+    #     # Update plotter sensors
+    #     if self.plotter:
+    #         self._update_plotter_sensors(data)
         
-        # Call user callbacks
-        for callback in self.data_callbacks:
-            try:
-                callback(timestamp, data, logconf_name)
-            except Exception as e:
-                self.logger.error(f"Error in meas callback: {e}")
+    #     # Call user callbacks
+    #     for callback in self.data_callbacks:
+    #         try:
+    #             callback(timestamp, data, logconf_name)
+    #         except Exception as e:
+    #             self.logger.error(f"Error in meas callback: {e}")
     
     def _log_error_callback(self, logconf, msg):
         """Callback for log errors"""
         self.logger.error(f"Log error: {msg}")
-    
-    def _update_plotter_position(self, data: Dict[str, Any]) -> None:
-        """Update plotter position"""
-        if not self.plotter:
-            return
-        
-        x = data.get('stateEstimate.x', 0)
-        y = data.get('stateEstimate.y', 0) 
-        z = data.get('stateEstimate.z', 0)
-        self.plotter.update_position(x, y, z)
-        self.plotter.process_events()
-    
-    def _update_plotter_sensors(self, data: Dict[str, Any]) -> None:
-        """Update plotter sensors"""
-        if not self.plotter:
-            return
-        
-        if 'range.front' in data:
-            sensor_data = {
-                'roll': data.get('stabilizer.roll', 0),
-                'pitch': data.get('stabilizer.pitch', 0),
-                'yaw': data.get('stabilizer.yaw', 0),
-                'front': data.get('range.front', 8000),
-                'back': data.get('range.back', 8000),
-                'left': data.get('range.left', 8000),
-                'right': data.get('range.right', 8000),
-                'up': data.get('range.up', 8000),
-                'down': data.get('range.zrange', 8000)
-            }
-            self.plotter.update_sensors(sensor_data)
-            self.plotter.process_events()
-    
+
     def _check_battery_safety(self, data: Dict[str, Any]) -> None:
         """Check battery safety from log data"""
         battery_voltage = data.get('pm.vbat', 0)
@@ -299,6 +233,7 @@ class CrazyflieController:
         """Connect to Crazyflie"""
         self.logger.info(f"Connecting to {uri}")
         self.cf.open_link(uri)
+        time.sleep(0.5)
         self._setup_crazyflie_params(x, y, z, yaw)
         self._setup_logging_async()
 
@@ -307,8 +242,6 @@ class CrazyflieController:
         """Disconnect from Crazyflie"""
         if self.lg_pos:
             self.lg_pos.stop()
-        if self.lg_meas:
-            self.lg_meas.stop()
         self.cf.close_link()
     
     def wait_for_connection(self, timeout: float = 10.0) -> bool:
@@ -330,26 +263,14 @@ class CrazyflieController:
         )
         self.safety_timer.start()
     
-    def setup_plotter(self) -> None:
-        """Setup 3D point cloud plotter if enabled"""
-        if not self.enable_plotting:
-            return
-        
-        try:
-            from .visualization import PointCloudPlotter
-            self.plotter = PointCloudPlotter()
-            self.plotter.start()
-            self.logger.info("3D visualization started")
-        except ImportError:
-            self.logger.warning("Visualization not available - install vispy and PyQt5")
-            self.enable_plotting = False
-    
     def emergency_shutdown(self) -> None:
         """Emergency shutdown procedure"""
         self.emergency_triggered = True
         self.flight_active = False
         if self.safety_timer:
             self.safety_timer.cancel()
+        self.cleanup()
+        self.disconnect()
         self.logger.warning("❌ Emergency shutdown initiated")
     
     def save_flight_data(self) -> None:

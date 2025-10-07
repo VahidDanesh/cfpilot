@@ -38,42 +38,60 @@ class GridMap:
         # Use NumPy array for fast operations (store floats directly)
         self.data = np.full((self.width, self.height), init_val, dtype=float)
 
-    def get_value_from_xy_index(self, x_ind: int, y_ind: int) -> float:
+    def valid(self, x_ind, y_ind) -> bool:
+        """Check if indices are within grid bounds"""
+        
+        # output an array of bools
+        x_ind = np.atleast_1d(x_ind)
+        y_ind = np.atleast_1d(y_ind)
+        return (0 <= x_ind) & (x_ind < self.width) & (0 <= y_ind) & (y_ind < self.height)
+    
+    def get_value_from_xy_index(self, x_ind, y_ind):
         """get_value_from_xy_index
 
-        when the index is out of grid map area, return None
+        when the index is out of grid map area, return None for that index
 
-        :param x_ind: x index
-        :param y_ind: y index
+        :param x_ind: x index (int or array-like)
+        :param y_ind: y index (int or array-like)
+        :return: value(s) from grid, None for out of bounds indices
         """
-        if 0 <= x_ind < self.width and 0 <= y_ind < self.height:
-            return self.data[x_ind, y_ind]
-        else:
+        is_scalar = np.isscalar(x_ind) and np.isscalar(y_ind)
+        x_ind = np.atleast_1d(x_ind)
+        y_ind = np.atleast_1d(y_ind)
+        
+        valid_mask = self.valid(x_ind, y_ind)
+        
+        # Return None if any index is out of bounds
+        if not np.all(valid_mask):
             return None
+        
+        result = self.data[x_ind, y_ind]
+        return result.item() if is_scalar else result
 
-    def get_xy_index_from_xy_pos(self, x_pos: float, y_pos: float) -> tuple:
+    def get_xy_index_from_xy_pos(self, x_pos, y_pos):
         """get_xy_index_from_xy_pos
 
-        :param x_pos: x position [m]
-        :param y_pos: y position [m]
+        :param x_pos: x position [m] (float or array-like)
+        :param y_pos: y position [m] (float or array-like)
         :return: tuple of (x_ind, y_ind) or (None, None) if out of bounds
         """
-        x_ind = self.calc_xy_index_from_position(
-            x_pos, self.left_lower_x, self.width)
-        y_ind = self.calc_xy_index_from_position(
-            y_pos, self.left_lower_y, self.height)
+        x_pos = np.atleast_1d(x_pos)
+        y_pos = np.atleast_1d(y_pos)
+        
+        x_ind = self.calc_xy_index_from_position(x_pos, self.left_lower_x, self.width)
+        y_ind = self.calc_xy_index_from_position(y_pos, self.left_lower_y, self.height)
 
         return x_ind, y_ind
     
-    def get_xy_poss_from_xy_indexes(self, x_ind: list, y_ind: list) -> tuple:
+    def get_xy_poss_from_xy_indexes(self, x_ind, y_ind):
         """get_pos_from_xy_index
 
-        :param x_ind: x index list
-        :param y_ind: y index list
+        :param x_ind: x index (int or array-like)
+        :param y_ind: y index (int or array-like)
         :return: tuple of (x_pos, y_pos) or (None, None) if out of bounds
         """
-        x_ind = np.array(x_ind)
-        y_ind = np.array(y_ind)
+        x_ind = np.atleast_1d(x_ind)
+        y_ind = np.atleast_1d(y_ind)
 
         if np.all((0 <= x_ind) & (x_ind < self.width)) and np.all((0 <= y_ind) & (y_ind < self.height)):
             x_pos = self.left_lower_x + x_ind * self.resolution + self.resolution / 2.0
@@ -82,14 +100,14 @@ class GridMap:
         else:
             return None, None
 
-    def set_value_from_xy_pos(self, x_pos: float, y_pos: float, val: float) -> bool:
+    def set_value_from_xy_pos(self, x_pos, y_pos, val):
         """set_value_from_xy_pos
 
         return bool flag, which means setting value is succeeded or not
 
-        :param x_pos: x position [m]
-        :param y_pos: y position [m]
-        :param val: grid value (float)
+        :param x_pos: x position [m] (float or array-like)
+        :param y_pos: y position [m] (float or array-like)
+        :param val: grid value (float or array-like)
         """
         x_ind, y_ind = self.get_xy_index_from_xy_pos(x_pos, y_pos)
 
@@ -100,20 +118,26 @@ class GridMap:
 
         return flag
 
-    def set_value_from_xy_index(self, x_ind: int, y_ind: int, val: float) -> bool:
+    def set_value_from_xy_index(self, x_ind, y_ind, val):
         """set_value_from_xy_index
 
         return bool flag, which means setting value is succeeded or not
 
-        :param x_ind: x index
-        :param y_ind: y index
-        :param val: grid value (float)
+        :param x_ind: x index (int or array-like)
+        :param y_ind: y index (int or array-like)
+        :param val: grid value (float or array-like)
         """
+        x_ind = np.atleast_1d(x_ind)
+        y_ind = np.atleast_1d(y_ind)
+        val = np.atleast_1d(val)
+        
         if x_ind is None or y_ind is None:
             return False
 
-        if 0 <= x_ind < self.width and 0 <= y_ind < self.height:
-            self.data[x_ind, y_ind] = float(val)
+        valid_mask = self.valid(x_ind, y_ind)
+        
+        if np.all(valid_mask):
+            self.data[x_ind, y_ind] = val
             return True  # OK
         else:
             return False  # NG
@@ -164,68 +188,77 @@ class GridMap:
         # Set values inside the polygon
         self.set_value_from_polygon(pol_x, pol_y, val, inside=True)
 
-    def calc_grid_index_from_xy_index(self, x_ind: int, y_ind: int) -> int:
+    def calc_grid_index_from_xy_index(self, x_ind, y_ind):
         """Calculate flat grid index from x,y indices (for compatibility)"""
-        grid_ind = int(y_ind * self.width + x_ind)
-        return grid_ind
+        x_ind = np.atleast_1d(x_ind)
+        y_ind = np.atleast_1d(y_ind)
+        grid_ind = (y_ind * self.width + x_ind).astype(int)
+        return grid_ind.item() if grid_ind.size == 1 else grid_ind
 
-    def calc_xy_index_from_grid_index(self, grid_ind: int) -> tuple:
+    def calc_xy_index_from_grid_index(self, grid_ind):
         """Calculate x,y indices from flat grid index (for compatibility)"""
-        y_ind, x_ind = divmod(grid_ind, self.width)
+        grid_ind = np.atleast_1d(grid_ind)
+        y_ind, x_ind = np.divmod(grid_ind, self.width)
+        if grid_ind.size == 1:
+            return x_ind.item(), y_ind.item()
         return x_ind, y_ind
 
-    def calc_grid_index_from_xy_pos(self, x_pos: float, y_pos: float) -> int:
+    def calc_grid_index_from_xy_pos(self, x_pos, y_pos):
         """calc_grid_index_from_xy_pos
 
-        :param x_pos: x position [m]
-        :param y_pos: y position [m]
+        :param x_pos: x position [m] (float or array-like)
+        :param y_pos: y position [m] (float or array-like)
         """
-        x_ind = self.calc_xy_index_from_position(
-            x_pos, self.left_lower_x, self.width)
-        y_ind = self.calc_xy_index_from_position(
-            y_pos, self.left_lower_y, self.height)
+        x_ind = self.calc_xy_index_from_position(x_pos, self.left_lower_x, self.width)
+        y_ind = self.calc_xy_index_from_position(y_pos, self.left_lower_y, self.height)
 
         return self.calc_grid_index_from_xy_index(x_ind, y_ind)
 
-    def calc_grid_central_xy_position_from_grid_index(self, grid_ind: int) -> tuple:
+    def calc_grid_central_xy_position_from_grid_index(self, grid_ind):
         """Calculate central x,y position from flat grid index"""
         x_ind, y_ind = self.calc_xy_index_from_grid_index(grid_ind)
         return self.calc_grid_central_xy_position_from_xy_index(x_ind, y_ind)
 
-    def calc_grid_central_xy_position_from_xy_index(self, x_ind: int, y_ind: int) -> tuple:
+    def calc_grid_central_xy_position_from_xy_index(self, x_ind, y_ind):
         """Calculate central x,y position from x,y indices"""
-        x_pos = self.calc_grid_central_xy_position_from_index(
-            x_ind, self.left_lower_x)
-        y_pos = self.calc_grid_central_xy_position_from_index(
-            y_ind, self.left_lower_y)
+        x_ind = np.atleast_1d(x_ind)
+        y_ind = np.atleast_1d(y_ind)
+        
+        x_pos = self.calc_grid_central_xy_position_from_index(x_ind, self.left_lower_x)
+        y_pos = self.calc_grid_central_xy_position_from_index(y_ind, self.left_lower_y)
 
+        if x_pos.size == 1:
+            return x_pos.item(), y_pos.item()
         return x_pos, y_pos
 
-    def calc_grid_central_xy_position_from_index(self, index: int, lower_pos: float) -> float:
+    def calc_grid_central_xy_position_from_index(self, index, lower_pos: float):
         """Calculate central position from index"""
+        index = np.atleast_1d(index)
         return lower_pos + index * self.resolution + self.resolution / 2.0
 
-    def calc_xy_index_from_position(self, pos: float, lower_pos: float, max_index: int) -> int:
+    def calc_xy_index_from_position(self, pos, lower_pos: float, max_index: int):
         """Calculate index from position"""
-        ind = int(np.floor((pos - lower_pos) / self.resolution))
-        if 0 <= ind <= max_index:
-            return ind
-        else:
+        pos = np.atleast_1d(pos)
+        ind = np.floor((pos - lower_pos) / self.resolution).astype(int)
+        valid_mask = (0 <= ind) & (ind <= max_index)
+        
+        if not np.all(valid_mask):
             return None
+        
+        return ind.item() if ind.size == 1 else ind
 
-    def check_occupied_from_xy_index(self, x_ind: int, y_ind: int, occupied_val: float) -> bool:
+    def check_occupied_from_xy_index(self, x_ind, y_ind, occupied_val: float):
         """Check if grid cell is occupied based on threshold value"""
         val = self.get_value_from_xy_index(x_ind, y_ind)
 
-        if val is None or val >= occupied_val:
+        if val is None:
             return True
-        else:
-            return False
+        
+        val = np.atleast_1d(val)
+        return val >= occupied_val
 
     def expand_grid(self, occupied_val: float = 1.0):
         """Expand occupied grid cells to neighboring cells"""
-        x_inds, y_inds, values = [], [], []
-
         x_inds, y_inds = np.where(self.data >= occupied_val)
         values = self.data[x_inds, y_inds]
 
