@@ -14,6 +14,7 @@ dynamic replanning when obstacles are detected.
 import math
 import sys
 import os
+import heapq
 from typing import overload
 import matplotlib.pyplot as plt
 import numpy as np
@@ -61,6 +62,20 @@ class Node:
         self.x = x
         self.y = y
         self.cost = cost
+    
+    def __hash__(self):
+        """Make Node hashable for use in sets/dicts"""
+        return hash((self.x, self.y))
+    
+    def __eq__(self, other):
+        """Equality comparison for Node"""
+        if not isinstance(other, Node):
+            return False
+        return self.x == other.x and self.y == other.y
+    
+    def __lt__(self, other):
+        """Less than comparison for heap operations"""
+        return (self.x, self.y) < (other.x, other.y)
 
 
 def add_coordinates(node1: Node, node2: Node):
@@ -118,13 +133,18 @@ class DStarLite:
         self.goal = Node(0, 0)
         
         # D* Lite data structures
-        self.U = []  # Priority queue (list of tuples: (node, key))
+        self.U = []  # Priority queue (min-heap of tuples: (key, counter, node))
+        self.U_set = set()  # Set for O(1) membership checking
+        self.counter = 0  # Tie-breaker for heap to maintain FIFO for equal keys
         self.km = 0.0  # Key modifier for incremental search
         self.rhs = self.create_grid(math.inf)  # One-step lookahead values
         self.g = self.create_grid(math.inf)     # Cost-to-goal estimates
         
         # Track previous map state for change detection
         self.previous_map = grid_map.data.copy()
+        
+        # Cache for obstacle lookups (cleared on map updates)
+        self.obstacle_cache = {}
         
         # Visualization
         self.show_animation = show_animation
@@ -140,19 +160,25 @@ class DStarLite:
 
     def is_obstacle(self, node: Node):
         """
-        Check if a node is an obstacle using the GridMap.
+        Check if a node is an obstacle using the GridMap (cached for performance).
         
         :param node: Node with grid indices
         :return: True if obstacle, False otherwise
         """
+        # Check cache first
+        node_tuple = (node.x, node.y)
+        if node_tuple in self.obstacle_cache:
+            return self.obstacle_cache[node_tuple]
+        
+        # Compute and cache
         if not self.is_valid(node):
-            return True
+            result = True
+        else:
+            val = self.grid_map.get_value_from_xy_index(node.x, node.y)
+            result = (val is None) or (val >= self.obstacle_threshold)
         
-        val = self.grid_map.get_value_from_xy_index(node.x, node.y)
-        if val is None:
-            return True
-        
-        return val >= self.obstacle_threshold
+        self.obstacle_cache[node_tuple] = result
+        return result
 
     def world_to_grid(self, x_world: float, y_world: float):
         """
@@ -175,15 +201,21 @@ class DStarLite:
         return self.grid_map.get_xy_poss_from_xy_indexes(x_ind, y_ind)
 
     def c(self, node1: Node, node2: Node):
-        """Cost of moving from node1 to node2"""
+        """Cost of moving from node1 to node2 (optimized)"""
         if self.is_obstacle(node2):
             return math.inf
         
-        # Find matching motion primitive
-        delta = Node(node1.x - node2.x, node1.y - node2.y)
-        for motion in self.motions:
-            if compare_coordinates(motion, delta):
-                return motion.cost
+        # Calculate delta directly without creating intermediate Node
+        dx = node1.x - node2.x
+        dy = node1.y - node2.y
+        
+        # Fast lookup based on common motion patterns
+        if dx == 0:
+            return 1 if abs(dy) == 1 else math.inf
+        elif dy == 0:
+            return 1 if abs(dx) == 1 else math.inf
+        elif abs(dx) == 1 and abs(dy) == 1:
+            return math.sqrt(2)
         
         return math.inf
 
@@ -210,9 +242,21 @@ class DStarLite:
         return 0 <= node.x < self.x_max and 0 <= node.y < self.y_max
 
     def get_neighbours(self, u: Node):
-        """Get valid neighbors of node u"""
-        return [add_coordinates(u, motion) for motion in self.motions
-                if self.is_valid(add_coordinates(u, motion))]
+        """Get valid neighbors of node u (optimized with bounds checking)"""
+        neighbors = []
+        x, y = u.x, u.y
+        
+        # Check each motion primitive with early bounds checking
+        for motion in self.motions:
+            new_x = x + motion.x
+            new_y = y + motion.y
+            
+            # Bounds check inline for speed
+            if 0 <= new_x < self.x_max and 0 <= new_y < self.y_max:
+                neighbor = Node(new_x, new_y, motion.cost)
+                neighbors.append(neighbor)
+        
+        return neighbors
 
     def initialize(self, start_x: float, start_y: float, goal_x: float, goal_y: float):
         """
@@ -239,28 +283,42 @@ class DStarLite:
             self.initialized = True
             print('Initializing D* Lite')
             self.U = []
+            self.U_set = set()
+            self.counter = 0
             self.km = 0.0
             self.rhs = self.create_grid(math.inf)
             self.g = self.create_grid(math.inf)
             self.rhs[self.goal.x][self.goal.y] = 0
-            self.U.append((self.goal, self.calculate_key(self.goal)))
+            
+            key = self.calculate_key(self.goal)
+            heapq.heappush(self.U, (key, self.counter, self.goal))
+            self.U_set.add(self.goal)
+            self.counter += 1
             
             # Store initial map state
             self.previous_map = self.grid_map.data.copy()
 
     def update_vertex(self, u: Node):
-        """Update vertex u in the priority queue"""
+        """Update vertex u in the priority queue (optimized with heap)"""
         if not compare_coordinates(u, self.goal):
-            self.rhs[u.x][u.y] = min([self.c(u, sprime) + self.g[sprime.x][sprime.y]
-                                      for sprime in self.get_neighbours(u)])
+            # Calculate minimum rhs value from successors
+            min_cost = math.inf
+            for sprime in self.get_neighbours(u):
+                cost = self.c(u, sprime) + self.g[sprime.x][sprime.y]
+                if cost < min_cost:
+                    min_cost = cost
+            self.rhs[u.x][u.y] = min_cost
         
-        # Remove u from priority queue if present
-        self.U = [(node, key) for node, key in self.U if not compare_coordinates(node, u)]
+        # Remove u from priority queue if present (mark as removed)
+        if u in self.U_set:
+            self.U_set.remove(u)
         
         # Add u to queue if inconsistent
         if self.g[u.x][u.y] != self.rhs[u.x][u.y]:
-            self.U.append((u, self.calculate_key(u)))
-            self.U.sort(key=lambda x: x[1])
+            key = self.calculate_key(u)
+            heapq.heappush(self.U, (key, self.counter, u))
+            self.U_set.add(u)
+            self.counter += 1
 
     def compare_keys(self, key_pair1: tuple[float, float],
                      key_pair2: tuple[float, float]):
@@ -268,28 +326,41 @@ class DStarLite:
                (key_pair1[0] == key_pair2[0] and key_pair1[1] < key_pair2[1])
 
     def compute_shortest_path(self):
-        """Main D* Lite algorithm - compute shortest path from start to goal"""
-        self.U.sort(key=lambda x: x[1])
-        
-        while len(self.U) > 0 and \
-              (self.compare_keys(self.U[0][1], self.calculate_key(self.start)) or
-               self.rhs[self.start.x][self.start.y] != self.g[self.start.x][self.start.y]):
+        """Main D* Lite algorithm - compute shortest path from start to goal (optimized)"""
+        while len(self.U) > 0:
+            # Pop from heap (may contain stale entries)
+            k_old, _, u = heapq.heappop(self.U)
             
-            kold = self.U[0][1]
-            u = self.U[0][0]
-            self.U.pop(0)
+            # Skip if this node was already processed (stale entry)
+            if u not in self.U_set:
+                continue
             
-            if self.compare_keys(kold, self.calculate_key(u)):
-                self.U.append((u, self.calculate_key(u)))
-                self.U.sort(key=lambda x: x[1])
+            # Remove from set now that we're processing it
+            self.U_set.remove(u)
+            
+            k_new = self.calculate_key(u)
+            
+            # Check termination condition
+            if not (self.compare_keys(k_old, self.calculate_key(self.start)) or
+                    self.rhs[self.start.x][self.start.y] != self.g[self.start.x][self.start.y]):
+                break
+            
+            if self.compare_keys(k_old, k_new):
+                # Key has changed, reinsert with new key
+                heapq.heappush(self.U, (k_new, self.counter, u))
+                self.U_set.add(u)
+                self.counter += 1
             elif self.g[u.x][u.y] > self.rhs[u.x][u.y]:
+                # Locally overconsistent
                 self.g[u.x][u.y] = self.rhs[u.x][u.y]
                 for s in self.get_neighbours(u):
                     self.update_vertex(s)
             else:
+                # Locally underconsistent
                 self.g[u.x][u.y] = math.inf
-                for s in self.get_neighbours(u) + [u]:
+                for s in self.get_neighbours(u):
                     self.update_vertex(s)
+                self.update_vertex(u)
 
     def detect_changes(self):
         """
@@ -336,6 +407,9 @@ class DStarLite:
                              If None, detects changes automatically
         :return: True if changes were detected and replanning occurred
         """
+        # Clear obstacle cache when map changes
+        self.obstacle_cache.clear()
+        
         if changed_cells is not None:
             # Use provided change list
             changed_vertices = []
@@ -527,7 +601,7 @@ class DStarLite:
     def run(self, 
             start:tuple, 
             goal:tuple, 
-            simplify:bool=True,
+            simplify:bool=False,
             smooth:bool=False,
             obstacle_callback=None):
         """
