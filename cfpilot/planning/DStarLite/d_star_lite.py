@@ -98,7 +98,7 @@ class DStarLite:
     """
 
     # Motion primitives: (dx, dy, cost)
-    # Adjust heuristic function (h) if you change these motions
+    # Adjust heuristic function (h), cost (c) if you change these motions
     motions = [
         Node(1, 0, 1),
         Node(0, 1, 1),
@@ -607,10 +607,10 @@ class DStarLite:
         """
         Plan and execute path from start to goal with dynamic replanning.
         
-        :param start_x: start x position in world coordinates [m]
-        :param start_y: start y position in world coordinates [m]
-        :param goal_x: goal x position in world coordinates [m]
-        :param goal_y: goal y position in world coordinates [m]
+        :param start: tuple of (x, y) start position in world coordinates [m]
+        :param goal: tuple of (x, y) goal position in world coordinates [m]
+        :param simplify: whether to simplify the path
+        :param smooth: whether to smooth the path
         :param obstacle_callback: optional function that returns list of new
                                  obstacle (x_ind, y_ind) tuples at each step
         :return: tuple (success, pathx, pathy) with path in world coordinates
@@ -619,13 +619,18 @@ class DStarLite:
         pathy = []
         start_x, start_y = start
         goal_x, goal_y = goal
+        
         # Initialize planning
         self.initialize(start_x, start_y, goal_x, goal_y)
+        
+        # Use separate variable for current position - DON'T modify self.start!
+        current_pos = Node(self.start.x, self.start.y)
         last = Node(self.start.x, self.start.y)
+        
         self.compute_shortest_path()
         
         # Add start to path
-        x_world, y_world = self.grid_to_world(self.start.x, self.start.y)
+        x_world, y_world = self.grid_to_world(current_pos.x, current_pos.y)
         pathx.append(x_world)
         pathy.append(y_world)
 
@@ -636,17 +641,17 @@ class DStarLite:
             current_path_image = self.plot_path(current_path, ".c")
 
         # Execute path with replanning
-        while not compare_coordinates(self.goal, self.start):
-            if self.g[self.start.x][self.start.y] == math.inf:
+        while not compare_coordinates(self.goal, current_pos):
+            if self.g[current_pos.x][current_pos.y] == math.inf:
                 print("No path possible")
                 return False, pathx, pathy
             
-            # Get next move
-            self.start = min(self.get_neighbours(self.start),
-                           key=lambda sprime: self.c(self.start, sprime) + 
-                                             self.g[sprime.x][sprime.y])
+            # Get next move (use current_pos, not self.start)
+            current_pos = min(self.get_neighbours(current_pos),
+                             key=lambda sprime: self.c(current_pos, sprime) + 
+                                               self.g[sprime.x][sprime.y])
             
-            x_world, y_world = self.grid_to_world(self.start.x, self.start.y)
+            x_world, y_world = self.grid_to_world(current_pos.x, current_pos.y)
             pathx.append(x_world)
             pathy.append(y_world)
             
@@ -673,11 +678,12 @@ class DStarLite:
             else:
                 # Auto-detect changes from GridMap
                 changed_vertices = self.detect_changes()
+                
                 if len(changed_vertices) != 0:
                     self.km += self.h(last)
-                    last = Node(self.start.x, self.start.y)
+                    last = Node(current_pos.x, current_pos.y)
                     for u in changed_vertices:
-                        if compare_coordinates(u, self.start):
+                        if compare_coordinates(u, current_pos):
                             continue
                         self.rhs[u.x][u.y] = math.inf
                         self.g[u.x][u.y] = math.inf
@@ -694,7 +700,7 @@ class DStarLite:
                             previous_path_image = self.plot_path(previous_path, ".c", alpha=0.3)
                             current_path_image = self.plot_path(current_path, ".c")
                             plt.pause(pause_time)
-        
+    
         print("Path found")
         pathx = np.ravel(pathx)
         pathy = np.ravel(pathy)
