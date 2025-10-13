@@ -321,6 +321,8 @@ class FlightDataPlotter:
         
         # Height over time
         ax3 = fig.add_subplot(223)
+        # remove high values (noise)
+        z = np.where(z > 1, np.nan, z)
         ax3.plot(self.data['time_elapsed'], z, 'g-', linewidth=1, label='Height')
         
         # Add z-range sensor if available

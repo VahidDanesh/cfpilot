@@ -157,6 +157,7 @@ class GridMap:
             pol_x = np.append(pol_x, pol_x[0])
             pol_y = np.append(pol_y, pol_y[0])
 
+        indexes = []
         # setting value for all grid
         for x_ind in range(self.width):
             for y_ind in range(self.height):
@@ -167,6 +168,8 @@ class GridMap:
 
                 if flag is inside:
                     self.set_value_from_xy_index(x_ind, y_ind, val)
+                    indexes.append((x_ind, y_ind))
+        return indexes
 
     def add_obstacle(self, center_x: float, center_y: float, radius: float, 
                      val: float = 1.0, n_sides: int = 16):
@@ -186,7 +189,8 @@ class GridMap:
         pol_y = center_y + radius * np.sin(angles)
         
         # Set values inside the polygon
-        self.set_value_from_polygon(pol_x, pol_y, val, inside=True)
+        indexes = self.set_value_from_polygon(pol_x, pol_y, val, inside=True)
+        return indexes
 
     def calc_grid_index_from_xy_index(self, x_ind, y_ind):
         """Calculate flat grid index from x,y indices (for compatibility)"""

@@ -326,7 +326,7 @@ class DStarLite:
                (key_pair1[0] == key_pair2[0] and key_pair1[1] < key_pair2[1])
 
     def compute_shortest_path(self):
-        """Main D* Lite algorithm - compute shortest path from start to goal (optimized)"""
+        """Main D* Lite algorithm - compute shortest path from start to goal"""
         while len(self.U) > 0:
             # Pop from heap (may contain stale entries)
             k_old, _, u = heapq.heappop(self.U)
