@@ -9,7 +9,7 @@ from typing import Dict, Optional
 from cflib.utils.multiranger import Multiranger
 
 
-class SensorFilter:
+class Sensor:
     """
     Queue-based sensor filter for multiranger data
     
@@ -47,7 +47,7 @@ class SensorFilter:
             return False
         return True
     
-    def _detect_spike(self, reading: float, queue: deque, threshold: float = 0.5) -> bool:
+    def _detect_spike(self, reading: float, queue: deque, threshold: float = 0.08) -> bool:
         """Detect if reading is a spike compared to recent history"""
         if len(queue) < 2:
             return False

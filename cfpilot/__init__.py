@@ -13,7 +13,7 @@ from .controller import CrazyflieController
 from .detection import LandingPadDetector
 from .missions import BasicFlightMission, SensorExplorationMission, LandingPadDetectionMission
 from .visualization import FlightDataPlotter
-from .sensors import SensorFilter, read_multiranger_raw, get_min_distance
+from .sensors import Sensor, read_multiranger_raw, get_min_distance
 
 try:
     from .visualization import PointCloudPlotter
