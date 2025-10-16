@@ -14,6 +14,7 @@ from matplotlib.patches import Circle
 
 from cfpilot.mapping import GridMap
 from cfpilot.planning.DStarLite.d_star_lite import DStarLite, Node
+from cfpilot.visualization import DroneNavigationVisualizer
 
 
 class PositionFilter:
@@ -47,15 +48,144 @@ class PositionFilter:
         self.filtered_y = y
 
 
-class SimpleMockSensor:
-    """Simple mock sensor that returns distance to nearest obstacle"""
+class MockMultiranger:
+    """
+    Mock Multiranger sensor that mimics cflib.utils.multiranger.Multiranger API
+    This allows using the EXACT same interface as real Crazyflie hardware
     
-    def __init__(self, obstacles):
+    API Compatibility with cflib.utils.multiranger.Multiranger:
+    ✓ Properties: front, back, left, right, up, down
+    ✓ Returns None if no obstacle detected (>2m or out of range)
+    ✓ Returns distance in meters if obstacle detected
+    ✓ Same data format: distances in meters or None
+    
+    Usage in simulation:
+        sensor = MockMultiranger(obstacles, drone_position, drone_yaw)
+        sensor.update_pose(x, y, yaw)  # Update position each step
+        distance = sensor.front  # Read sensor (just like real hardware)
+    
+    Transition to real hardware (cflib):
+        from cflib.utils.multiranger import Multiranger
+        sensor = Multiranger(scf, rate_ms=100)
+        sensor.start()
+        distance = sensor.front  # SAME property access!
+    """
+    
+    def __init__(self, obstacles, drone_position=(0, 0), drone_yaw=0):
         """
         Args:
-            obstacles: List of (x, y, radius) tuples
+            obstacles: List of (x, y, radius) tuples representing circular obstacles
+            drone_position: Current (x, y) position of drone
+            drone_yaw: Current yaw angle in radians
         """
         self.obstacles = obstacles
+        self._drone_x = drone_position[0]
+        self._drone_y = drone_position[1]
+        self._drone_yaw = drone_yaw
+        
+        # Sensor readings (mimics Multiranger properties)
+        self._front_distance = None
+        self._back_distance = None
+        self._left_distance = None
+        self._right_distance = None
+        self._up_distance = None
+        self._down_distance = None
+        
+        # Multiranger sensor specs
+        self._max_range = 2.0  # 2 meters max range
+        self._min_range = 0.01  # 1cm min range
+    
+    def update_pose(self, x, y, yaw):
+        """Update drone position and orientation, then refresh sensor readings"""
+        self._drone_x = x
+        self._drone_y = y
+        self._drone_yaw = yaw
+        self._scan()
+    
+    def _raycast(self, direction_angle, max_range=2.0):
+        """
+        Raycast in a specific direction to find nearest obstacle
+        Uses multiple rays (±5°) for better detection coverage
+        
+        Args:
+            direction_angle: Angle in radians (world frame)
+            max_range: Maximum detection range in meters
+            
+        Returns:
+            Distance in meters or None if nothing detected
+        """
+        min_dist = max_range
+        
+        # Use 3 raycasts per direction for better coverage (matches real sensor cone)
+        for angle_offset in [-0.087, 0.0, 0.087]:  # -5°, 0°, +5°
+            scan_angle = direction_angle + angle_offset
+            dx = np.cos(scan_angle)
+            dy = np.sin(scan_angle)
+            
+            for obs_x, obs_y, radius in self.obstacles:
+                # Vector from drone to obstacle center
+                to_obs = np.array([obs_x - self._drone_x, obs_y - self._drone_y])
+                
+                # Project onto ray direction
+                proj = np.dot(to_obs, [dx, dy])
+                
+                if proj > 0:  # Obstacle is in front of sensor
+                    # Perpendicular distance to ray
+                    perp_dist = np.linalg.norm(to_obs - proj * np.array([dx, dy]))
+                    
+                    # Check if ray intersects obstacle circle
+                    if perp_dist <= radius:
+                        # Distance to obstacle surface
+                        hit_dist = proj - np.sqrt(radius**2 - perp_dist**2)
+                        if hit_dist > self._min_range:
+                            min_dist = min(min_dist, hit_dist)
+        
+        # Return None if out of range (mimics real Multiranger behavior)
+        return min_dist if min_dist < max_range else None
+    
+    def _scan(self):
+        """Perform sensor scan in all directions and update readings"""
+        # Sensor directions relative to drone yaw (body frame)
+        # Front: 0°, Right: -90°, Back: 180°, Left: +90°
+        self._front_distance = self._raycast(self._drone_yaw, self._max_range)
+        self._back_distance = self._raycast(self._drone_yaw + np.pi, self._max_range)
+        self._left_distance = self._raycast(self._drone_yaw + np.pi/2, self._max_range)
+        self._right_distance = self._raycast(self._drone_yaw - np.pi/2, self._max_range)
+        
+        # Up/Down not used in 2D simulation
+        self._up_distance = None
+        self._down_distance = None
+    
+    # Properties that match cflib.utils.multiranger.Multiranger API
+    @property
+    def front(self):
+        """Distance to obstacle in front (meters) or None"""
+        return self._front_distance
+    
+    @property
+    def back(self):
+        """Distance to obstacle behind (meters) or None"""
+        return self._back_distance
+    
+    @property
+    def left(self):
+        """Distance to obstacle on left (meters) or None"""
+        return self._left_distance
+    
+    @property
+    def right(self):
+        """Distance to obstacle on right (meters) or None"""
+        return self._right_distance
+    
+    @property
+    def up(self):
+        """Distance to obstacle above (meters) or None"""
+        return self._up_distance
+    
+    @property
+    def down(self):
+        """Distance to obstacle below (meters) or None"""
+        return self._down_distance
     
     def check_collision(self, x, y, safety_radius=0.1):
         """
@@ -73,56 +203,16 @@ class SimpleMockSensor:
             if dist_to_obs < (obs_radius + safety_radius):
                 return True, (obs_x, obs_y, obs_radius)
         return False, None
-    
-    def scan(self, x, y, yaw, max_range=2.0):
-        """
-        Scan in 4 directions (front, back, left, right)
-        Uses multiple raycasts per direction for more robust detection
-        
-        Returns:
-            dict with distances in meters
-        """
-        directions = {
-            'front': yaw,
-            'right': yaw - np.pi/2,
-            'back': yaw + np.pi,
-            'left': yaw + np.pi/2
-        }
-        
-        readings = {}
-        for name, angle in directions.items():
-            # Use 3 raycasts per direction (center, +5deg, -5deg) for better coverage
-            min_dist = max_range
-            
-            for angle_offset in [-0.087, 0.0, 0.087]:  # -5deg, 0deg, +5deg
-                scan_angle = angle + angle_offset
-                dx = np.cos(scan_angle)
-                dy = np.sin(scan_angle)
-                
-                for obs_x, obs_y, radius in self.obstacles:
-                    # Distance to obstacle center
-                    to_obs = np.array([obs_x - x, obs_y - y])
-                    proj = np.dot(to_obs, [dx, dy])
-                    
-                    if proj > 0:  # In front
-                        perp_dist = np.linalg.norm(to_obs - proj * np.array([dx, dy]))
-                        if perp_dist <= radius:
-                            hit_dist = proj - np.sqrt(radius**2 - perp_dist**2)
-                            if hit_dist > 0:
-                                min_dist = min(min_dist, hit_dist)
-            
-            readings[name] = min_dist if min_dist < max_range else None
-        
-        return readings
 
 
 def calculate_repulsion(sensors, yaw, danger_dist=0.7):
     """
     Calculate repulsion vector from obstacles using sensor data
-    (Adapted from path_planning_v2.py)
+    Compatible with Multiranger sensor format (Adapted from path_planning_v2.py)
     
     Args:
-        sensors: Dict with sensor distances in meters
+        sensors: Dict with sensor distances in meters (front/back/left/right)
+                 Format matches Multiranger properties (distance or None)
         yaw: Current yaw in radians
         danger_dist: Distance threshold for repulsion
         
@@ -255,8 +345,8 @@ def plan_path_with_dstar(grid_map, start_pos, goal_pos):
     path_found, pathx, pathy = planner.run(
         start=start_pos, 
         goal=goal_pos,
-        simplify=False,
-        smooth=False
+        simplify=True,
+        smooth=True
     )
     
     if not path_found or len(pathx) == 0:
@@ -295,63 +385,49 @@ def simple_simulation(show_animation=True, animation_speed=0.01):
     print("   ✅ Grid map created with ONLY boundaries")
     print("   ℹ️  Drone has no knowledge of obstacles yet")
     
+    # Start and goal
+    start = (0.5, 1.5)
+    goal = (4.5, 1.0)
+    
     # True obstacles exist in the environment (for sensor simulation)
     # These are NOT in the grid_map - drone will discover them via sensors!
     true_obstacles = [
         (1.5, 1.8, 0.25),
-        (2.5, 1.2, 0.25),
+        (2.5, 0.8, 0.25),
         (2.5, 2.0, 0.25),
         (3.5, 1.8, 0.25),
 
     ]
     
     # Mock sensor knows about true obstacles (to simulate real sensor readings)
-    sensor = SimpleMockSensor(true_obstacles)
-    
-    # Start and goal
-    start = (0.5, 1.5)
-    goal = (4.5, 2.5)
+    # Uses EXACT same API as cflib.utils.multiranger.Multiranger
+    # 
+    # TO USE WITH REAL CRAZYFLIE, replace MockMultiranger with:
+    #   from cflib.utils.multiranger import Multiranger
+    #   sensor = Multiranger(scf, rate_ms=100)
+    #   sensor.start()
+    # Then use: sensor.front, sensor.back, sensor.left, sensor.right
+    sensor = MockMultiranger(true_obstacles, drone_position=start, drone_yaw=0)
     
     print(f"   Start: {start}")
     print(f"   Goal: {goal}")
     print(f"   True obstacles in environment: {len(true_obstacles)} (unknown to drone)")
     
     # Setup animation if enabled
+    visualizer = None
     if show_animation:
-        plt.ion()  # Enable interactive mode
-        fig, ax = plt.subplots(figsize=(14, 9))
-        
-        # Plot true obstacles as reference (faint dashed circles)
-        # These represent the TRUE environment, not what the drone knows
-        for obs_x, obs_y, radius in true_obstacles:
-            circle = Circle((obs_x, obs_y), radius, color='red', alpha=0.15, 
-                           linewidth=1, edgecolor='red', linestyle='--',
-                           label='True obstacles (unknown)' if obs_x == true_obstacles[0][0] else '')
-            ax.add_patch(circle)
-        
-        # Plot start and goal
-        ax.plot(start[0], start[1], 'g^', markersize=15, label='Start', zorder=10)
-        ax.plot(goal[0], goal[1], 'm*', markersize=20, label='Goal', zorder=10)
-        
-        # Initialize plot elements
-        trajectory_line, = ax.plot([], [], 'g-', linewidth=2, label='Trajectory', alpha=0.7)
-        drone_pos, = ax.plot([], [], 'bo', markersize=12, label='Drone', zorder=11)
-        path_line, = ax.plot([], [], 'b--', alpha=0.4, linewidth=1, label='Planned Path')
-        sensor_lines = []  # Will hold sensor range indicators
-        avoidance_arrows = []  # Will hold avoidance force arrows
-        discovered_map = None  # Will hold the heatmap
-        
-        ax.set_xlabel('X [m]')
-        ax.set_ylabel('Y [m]')
-        ax.set_title('Real-time Simulation - Initial: No obstacles known')
-        ax.set_xlim(0, 5)
-        ax.set_ylim(0, 3)
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc='upper right', fontsize=9)
-        ax.set_aspect('equal')
-        
-        plt.tight_layout()
-        plt.pause(0.1)
+        visualizer = DroneNavigationVisualizer(
+            xlim=(0, 5), 
+            ylim=(0, 3), 
+            figsize=(14, 9), 
+            animation_speed=animation_speed
+        )
+        visualizer.setup(
+            start=start, 
+            goal=goal, 
+            true_obstacles=true_obstacles, 
+            grid_map=grid_map
+        )
     
     # Initial path planning with EMPTY map (only boundaries known!)
     print("\n🛤️  Planning initial path with EMPTY map...")
@@ -365,9 +441,8 @@ def simple_simulation(show_animation=True, animation_speed=0.01):
     print(f"   ✅ Initial path planned: {len(waypoints_x)} waypoints")
     print("   ℹ️  This path likely goes through obstacles (drone doesn't know yet!)")
     
-    if show_animation:
-        path_line.set_data(waypoints_x, waypoints_y)
-        ax.set_title('Initial Path (Naive - no obstacles known)')
+    if visualizer:
+        visualizer.update_path(waypoints_x, waypoints_y)
         plt.pause(0.5)
     
     # Simulate movement with real-time obstacle discovery
@@ -399,8 +474,16 @@ def simple_simulation(show_animation=True, animation_speed=0.01):
             print(f"✅ Goal reached at step {step}!")
             break
         
-        # Read sensors
-        sensors = sensor.scan(x, y, yaw, max_range=2.0)
+        # Update sensor with current pose and read distances
+        sensor.update_pose(x, y, yaw)
+        
+        # Read sensor distances (using Multiranger API)
+        sensors = {
+            'front': sensor.front,
+            'back': sensor.back,
+            'left': sensor.left,
+            'right': sensor.right
+        }
         
         # Calculate repulsion forces from nearby obstacles
         rep_x, rep_y, emergency = calculate_repulsion(sensors, yaw, danger_dist=0.6)
@@ -435,9 +518,9 @@ def simple_simulation(show_animation=True, animation_speed=0.01):
                     replan_cooldown = 30  # Long cooldown to avoid oscillation
                     print(f"   ✅ Escape replan: {len(waypoints_x)} waypoints")
                     
-                    if show_animation:
-                        path_line.set_data(waypoints_x, waypoints_y)
-                        ax.plot(x, y, 'mo', markersize=12, zorder=9)
+                    if visualizer:
+                        visualizer.update_path(waypoints_x, waypoints_y)
+                        visualizer.mark_replan(x, y)
                         plt.pause(0.3)
             
             continue
@@ -460,70 +543,25 @@ def simple_simulation(show_animation=True, animation_speed=0.01):
             cells_updated = 0
         
         # Update animation
-        if show_animation and step % 5 == 0:  # Update every 5 steps for performance
-            # Update drone position
-            drone_pos.set_data([x], [y])
+        if visualizer:
+            # Update drone position and trajectory
+            visualizer.update_drone(x, y, yaw)
             
-            # Update trajectory
-            trajectory_line.set_data(trajectory_x, trajectory_y)
+            # Update sensor readings
+            visualizer.update_sensors(sensors)
             
-            # Draw sensor ranges
-            for line in sensor_lines:
-                line.remove()
-            sensor_lines = []
+            # Update repulsion force
+            visualizer.update_repulsion(rep_x, rep_y)
             
-            for direction, distance in sensors.items():
-                if distance is not None and distance < 2.0:
-                    angle_offset = {'front': 0, 'right': -np.pi/2, 
-                                   'back': np.pi, 'left': np.pi/2}[direction]
-                    angle = yaw + angle_offset
-                    end_x = x + distance * np.cos(angle)
-                    end_y = y + distance * np.sin(angle)
-                    
-                    # Color code: red if close, yellow if moderate distance
-                    color = 'red' if distance < 0.4 else 'orange' if distance < 0.6 else 'yellow'
-                    alpha = 0.7 if distance < 0.4 else 0.5 if distance < 0.6 else 0.3
-                    
-                    line = ax.plot([x, end_x], [y, end_y], color=color, 
-                                  alpha=alpha, linewidth=2, zorder=5)[0]
-                    sensor_lines.append(line)
+            # Set status flags
+            visualizer.set_status(
+                stuck=(stuck_counter > 10),
+                emergency=emergency,
+                avoiding=(np.hypot(rep_x, rep_y) > 0.1)
+            )
             
-            # Clear old avoidance arrows
-            for arrow in avoidance_arrows:
-                arrow.remove()
-            avoidance_arrows = []
-            
-            # Draw repulsion force if active
-            rep_mag = np.hypot(rep_x, rep_y)
-            if rep_mag > 0.05:
-                arrow = ax.arrow(x, y, rep_x * 0.4, rep_y * 0.4, 
-                               head_width=0.08, head_length=0.08,
-                               fc='orange', ec='darkorange', 
-                               linewidth=2, alpha=0.8, zorder=8)
-                avoidance_arrows.append(arrow)
-            
-            # Update discovered map (redraw heatmap)
-            if discovered_map is not None:
-                discovered_map.remove()
-            
-            # Create heatmap of discovered obstacles
-            # This shows what the drone has learned so far
-            extent = [0, 5, 0, 3]
-            discovered_map = ax.imshow(grid_map.data.T, cmap='Blues', 
-                                      alpha=0.6, vmin=0, vmax=1,
-                                      origin='lower', extent=extent, zorder=1)
-            
-            # Update title with current knowledge state
-            status = f'Step {step} | Replans: {replans}'
-            if stuck_counter > 10:
-                status += ' | ⚠️ STUCK'
-            elif emergency:
-                status += ' | 🛑 EMERGENCY'
-            elif rep_mag > 0.1:
-                status += ' | 🔄 AVOIDING'
-            ax.set_title(status)
-            
-            plt.pause(animation_speed)
+            # Render visualization
+            visualizer.render()
         
         # Check if path is blocked (but only replan if cooldown expired)
         if cells_updated > 0 and waypoint_idx < len(waypoints_x) and replan_cooldown == 0:
@@ -552,11 +590,11 @@ def simple_simulation(show_animation=True, animation_speed=0.01):
                     replan_cooldown = 25  # Add cooldown to prevent rapid replanning
                     print(f"   ✅ Replanned with {len(waypoints_x)} waypoints")
                     
-                    if show_animation:
+                    if visualizer:
                         # Update path line
-                        path_line.set_data(waypoints_x, waypoints_y)
+                        visualizer.update_path(waypoints_x, waypoints_y)
                         # Mark replan position
-                        ax.plot(x, y, 'ro', markersize=10, zorder=9)
+                        visualizer.mark_replan(x, y)
                         plt.pause(0.5)
                 else:
                     print("   ❌ Replanning failed!")
@@ -651,32 +689,8 @@ def simple_simulation(show_animation=True, animation_speed=0.01):
         print(f"   ⚠️  Warning: Trajectory had collisions")
     
     # Final visualization
-    if show_animation:
-        plt.ioff()  # Disable interactive mode
-        
-        # Final update
-        drone_pos.set_data([x], [y])
-        trajectory_line.set_data(trajectory_x, trajectory_y)
-        
-        # Add replan markers
-        if replan_positions:
-            rx, ry = zip(*replan_positions)
-            ax.plot(rx, ry, 'ro', markersize=12, label=f'Replans ({replans})', zorder=9)
-        
-        # Redraw true obstacles more visible
-        for obs_x, obs_y, radius in true_obstacles:
-            circle = Circle((obs_x, obs_y), radius, color='red', alpha=0.3, 
-                           linewidth=2, edgecolor='red', linestyle='-')
-            ax.add_patch(circle)
-        
-        ax.set_title(f'Final Result (Total Steps: {step}, Replans: {replans})')
-        ax.legend(loc='upper right')
-        plt.tight_layout()
-        
-        print("\n📈 Saving final visualization...")
-        plt.savefig('simple_simulation_result.png', dpi=150)
-        print("💾 Saved to simple_simulation_result.png")
-        plt.show()
+    if visualizer:
+        visualizer.finalize('simple_simulation_result.png')
     else:
         # Static visualization
         print("\n📈 Creating visualization...")

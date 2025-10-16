@@ -249,6 +249,382 @@ Flight Data Visualization Tool
 Plots flight data from Crazyflie landing pad detection missions
 """
 
+
+class DroneNavigationVisualizer:
+    """
+    Real-time 2D navigation visualization for Crazyflie
+    
+    Works with both simulation and real hardware:
+    - Simulation: Pass sensor readings from MockMultiranger
+    - Real Hardware: Pass sensor readings from cflib.utils.multiranger.Multiranger
+    
+    Usage with simulation:
+        visualizer = DroneNavigationVisualizer(xlim=(0, 5), ylim=(0, 3))
+        visualizer.setup(start, goal, true_obstacles=obstacles, grid_map=grid_map)
+        
+        # In control loop:
+        visualizer.update_drone(x, y, yaw)
+        visualizer.update_sensors({'front': sensor.front, 'back': sensor.back, ...})
+        visualizer.update_path(waypoints_x, waypoints_y)
+        visualizer.render()
+    
+    Usage with real hardware:
+        visualizer = DroneNavigationVisualizer(xlim=(-2, 2), ylim=(-2, 2))
+        visualizer.setup(start=(0, 0), goal=(1.5, 1.5))
+        
+        # In controller callback:
+        def data_callback(timestamp, data, logconf_name):
+            x = data.get('stateEstimate.x', 0)
+            y = data.get('stateEstimate.y', 0)
+            yaw = data.get('stabilizer.yaw', 0)
+            visualizer.update_drone(x, y, yaw)
+            
+            # With Multiranger sensor:
+            sensors = {
+                'front': multiranger.front,
+                'back': multiranger.back,
+                'left': multiranger.left,
+                'right': multiranger.right
+            }
+            visualizer.update_sensors(sensors)
+            visualizer.render()
+    """
+    
+    def __init__(self, xlim=(0, 5), ylim=(0, 3), figsize=(14, 9), animation_speed=0.01):
+        """
+        Initialize visualizer
+        
+        Args:
+            xlim: X-axis limits (min, max) in meters
+            ylim: Y-axis limits (min, max) in meters
+            figsize: Figure size (width, height) in inches
+            animation_speed: Pause time between frames (seconds)
+        """
+        self.xlim = xlim
+        self.ylim = ylim
+        self.figsize = figsize
+        self.animation_speed = animation_speed
+        
+        # Matplotlib elements
+        self.fig = None
+        self.ax = None
+        self.is_setup = False
+        
+        # Plot elements
+        self.drone_pos = None
+        self.trajectory_line = None
+        self.path_line = None
+        self.sensor_lines = []
+        self.avoidance_arrows = []
+        self.discovered_map = None
+        self.replan_markers = None
+        
+        # State tracking
+        self.trajectory_x = []
+        self.trajectory_y = []
+        self.current_x = 0.0
+        self.current_y = 0.0
+        self.current_yaw = 0.0
+        self.current_sensors = {}
+        self.repulsion_force = (0.0, 0.0)
+        self.replans = 0
+        self.replan_positions = []
+        self.step_counter = 0
+        self.status_flags = {'stuck': False, 'emergency': False, 'avoiding': False}
+        
+        # Map and environment
+        self.grid_map = None
+        self.true_obstacles = []
+        self.start_pos = None
+        self.goal_pos = None
+    
+    def setup(self, start, goal, true_obstacles=None, grid_map=None):
+        """
+        Setup visualization with initial environment
+        
+        Args:
+            start: (x, y) tuple for start position
+            goal: (x, y) tuple for goal position
+            true_obstacles: List of (x, y, radius) tuples (optional, for simulation)
+            grid_map: GridMap instance (optional, for discovered obstacles)
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Circle
+        
+        if self.is_setup:
+            print("⚠️  Visualizer already setup. Call reset() first to reinitialize.")
+            return
+        
+        # Store environment
+        self.start_pos = start
+        self.goal_pos = goal
+        self.true_obstacles = true_obstacles if true_obstacles else []
+        self.grid_map = grid_map
+        
+        # Reset trajectory
+        self.trajectory_x = [start[0]]
+        self.trajectory_y = [start[1]]
+        self.current_x = start[0]
+        self.current_y = start[1]
+        
+        # Create figure
+        plt.ion()  # Enable interactive mode
+        self.fig, self.ax = plt.subplots(figsize=self.figsize)
+        
+        # Plot true obstacles (if provided, for simulation)
+        if self.true_obstacles:
+            for obs_x, obs_y, radius in self.true_obstacles:
+                circle = Circle((obs_x, obs_y), radius, color='red', alpha=0.15,
+                               linewidth=1, edgecolor='red', linestyle='--',
+                               label='True obstacles (unknown)' if obs_x == self.true_obstacles[0][0] else '')
+                self.ax.add_patch(circle)
+        
+        # Plot start and goal
+        self.ax.plot(start[0], start[1], 'g^', markersize=15, label='Start', zorder=10)
+        self.ax.plot(goal[0], goal[1], 'm*', markersize=20, label='Goal', zorder=10)
+        
+        # Initialize plot elements
+        self.trajectory_line, = self.ax.plot([], [], 'g-', linewidth=2, label='Trajectory', alpha=0.7)
+        self.drone_pos, = self.ax.plot([], [], 'bo', markersize=12, label='Drone', zorder=11)
+        self.path_line, = self.ax.plot([], [], 'b--', alpha=0.4, linewidth=1, label='Planned Path')
+        
+        # Configure axes
+        self.ax.set_xlabel('X [m]')
+        self.ax.set_ylabel('Y [m]')
+        self.ax.set_title('Real-time Navigation - Initializing...')
+        self.ax.set_xlim(self.xlim)
+        self.ax.set_ylim(self.ylim)
+        self.ax.grid(True, alpha=0.3)
+        self.ax.legend(loc='upper right', fontsize=9)
+        self.ax.set_aspect('equal')
+        
+        plt.tight_layout()
+        plt.pause(0.1)
+        
+        self.is_setup = True
+        print("✅ Visualizer setup complete")
+    
+    def update_drone(self, x, y, yaw=0.0):
+        """
+        Update drone position and orientation
+        
+        Args:
+            x: X position in meters
+            y: Y position in meters
+            yaw: Yaw angle in radians (optional)
+        """
+        self.current_x = x
+        self.current_y = y
+        self.current_yaw = yaw
+        
+        # Add to trajectory
+        self.trajectory_x.append(x)
+        self.trajectory_y.append(y)
+        self.step_counter += 1
+    
+    def update_sensors(self, sensors):
+        """
+        Update sensor readings (compatible with Multiranger API)
+        
+        Args:
+            sensors: Dict with keys 'front', 'back', 'left', 'right'
+                     Values are distances in meters or None
+        """
+        self.current_sensors = sensors.copy()
+    
+    def update_path(self, waypoints_x, waypoints_y):
+        """
+        Update planned path waypoints
+        
+        Args:
+            waypoints_x: List of X coordinates
+            waypoints_y: List of Y coordinates
+        """
+        if not self.is_setup:
+            return
+        
+        self.path_line.set_data(waypoints_x, waypoints_y)
+    
+    def update_repulsion(self, rep_x, rep_y):
+        """
+        Update repulsion force vector for visualization
+        
+        Args:
+            rep_x: Repulsion force in X direction
+            rep_y: Repulsion force in Y direction
+        """
+        self.repulsion_force = (rep_x, rep_y)
+    
+    def mark_replan(self, x=None, y=None):
+        """
+        Mark a replanning event at current or specified position
+        
+        Args:
+            x: X position (uses current position if None)
+            y: Y position (uses current position if None)
+        """
+        x = x if x is not None else self.current_x
+        y = y if y is not None else self.current_y
+        
+        self.replans += 1
+        self.replan_positions.append((x, y))
+    
+    def set_status(self, stuck=False, emergency=False, avoiding=False):
+        """
+        Set status flags for display
+        
+        Args:
+            stuck: True if drone is stuck
+            emergency: True if emergency stop is active
+            avoiding: True if actively avoiding obstacles
+        """
+        self.status_flags = {
+            'stuck': stuck,
+            'emergency': emergency,
+            'avoiding': avoiding
+        }
+    
+    def render(self, force=False):
+        """
+        Render current visualization state
+        
+        Args:
+            force: If True, render every call. If False, render every 5 steps (for performance)
+        """
+        if not self.is_setup:
+            return
+        
+        # Render every 5 steps for performance (unless forced)
+        if not force and self.step_counter % 5 != 0:
+            return
+        
+        # Update drone position
+        self.drone_pos.set_data([self.current_x], [self.current_y])
+        
+        # Update trajectory
+        self.trajectory_line.set_data(self.trajectory_x, self.trajectory_y)
+        
+        # Draw sensor ranges
+        for line in self.sensor_lines:
+            line.remove()
+        self.sensor_lines = []
+        
+        for direction, distance in self.current_sensors.items():
+            if distance is not None and distance < 2.0:
+                angle_offset = {'front': 0, 'right': -np.pi/2,
+                               'back': np.pi, 'left': np.pi/2}.get(direction, 0)
+                angle = self.current_yaw + angle_offset
+                end_x = self.current_x + distance * np.cos(angle)
+                end_y = self.current_y + distance * np.sin(angle)
+                
+                # Color code: red if close, yellow if moderate distance
+                color = 'red' if distance < 0.4 else 'orange' if distance < 0.6 else 'yellow'
+                alpha = 0.7 if distance < 0.4 else 0.5 if distance < 0.6 else 0.3
+                
+                line = self.ax.plot([self.current_x, end_x], [self.current_y, end_y],
+                                   color=color, alpha=alpha, linewidth=2, zorder=5)[0]
+                self.sensor_lines.append(line)
+        
+        # Clear old avoidance arrows
+        for arrow in self.avoidance_arrows:
+            arrow.remove()
+        self.avoidance_arrows = []
+        
+        # Draw repulsion force if active
+        rep_x, rep_y = self.repulsion_force
+        rep_mag = np.hypot(rep_x, rep_y)
+        if rep_mag > 0.05:
+            arrow = self.ax.arrow(self.current_x, self.current_y, rep_x * 0.4, rep_y * 0.4,
+                                 head_width=0.08, head_length=0.08,
+                                 fc='orange', ec='darkorange',
+                                 linewidth=2, alpha=0.8, zorder=8)
+            self.avoidance_arrows.append(arrow)
+        
+        # Update discovered map (if available)
+        if self.grid_map is not None:
+            if self.discovered_map is not None:
+                self.discovered_map.remove()
+            
+            # Create heatmap of discovered obstacles
+            extent = [self.xlim[0], self.xlim[1], self.ylim[0], self.ylim[1]]
+            self.discovered_map = self.ax.imshow(self.grid_map.data.T, cmap='Blues',
+                                                alpha=0.6, vmin=0, vmax=1,
+                                                origin='lower', extent=extent, zorder=1)
+        
+        # Update title with status
+        status = f'Step {self.step_counter} | Replans: {self.replans}'
+        if self.status_flags['stuck']:
+            status += ' | ⚠️ STUCK'
+        elif self.status_flags['emergency']:
+            status += ' | 🛑 EMERGENCY'
+        elif self.status_flags['avoiding']:
+            status += ' | 🔄 AVOIDING'
+        self.ax.set_title(status)
+        
+        plt.pause(self.animation_speed)
+    
+    def finalize(self, save_path='navigation_result.png'):
+        """
+        Finalize visualization and save result
+        
+        Args:
+            save_path: Path to save final image
+        """
+        if not self.is_setup:
+            return
+        
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Circle
+        
+        plt.ioff()  # Disable interactive mode
+        
+        # Final update
+        self.drone_pos.set_data([self.current_x], [self.current_y])
+        self.trajectory_line.set_data(self.trajectory_x, self.trajectory_y)
+        
+        # Add replan markers
+        if self.replan_positions:
+            rx, ry = zip(*self.replan_positions)
+            self.ax.plot(rx, ry, 'ro', markersize=12, label=f'Replans ({self.replans})', zorder=9)
+        
+        # Redraw true obstacles more visible (if simulation)
+        if self.true_obstacles:
+            for obs_x, obs_y, radius in self.true_obstacles:
+                circle = Circle((obs_x, obs_y), radius, color='red', alpha=0.3,
+                               linewidth=2, edgecolor='red', linestyle='-')
+                self.ax.add_patch(circle)
+        
+        self.ax.set_title(f'Final Result (Steps: {self.step_counter}, Replans: {self.replans})')
+        self.ax.legend(loc='upper right')
+        plt.tight_layout()
+        
+        print(f"\n📈 Saving final visualization to {save_path}...")
+        plt.savefig(save_path, dpi=150)
+        print(f"💾 Saved to {save_path}")
+        plt.show()
+    
+    def reset(self):
+        """Reset visualizer state"""
+        import matplotlib.pyplot as plt
+        
+        if self.fig is not None:
+            plt.close(self.fig)
+        
+        self.fig = None
+        self.ax = None
+        self.is_setup = False
+        self.trajectory_x = []
+        self.trajectory_y = []
+        self.step_counter = 0
+        self.replans = 0
+        self.replan_positions = []
+        self.sensor_lines = []
+        self.avoidance_arrows = []
+        self.discovered_map = None
+        
+        print("✅ Visualizer reset")
+
+
 class FlightDataPlotter:
     """Visualize flight data and landing pad detection results"""
     
