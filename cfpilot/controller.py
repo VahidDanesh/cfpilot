@@ -153,8 +153,8 @@ class CrazyflieController:
         self.lg.add_variable('stateEstimate.y', 'float')
         self.lg.add_variable('stateEstimate.z', 'float')
         self.lg.add_variable('stabilizer.yaw', 'float')
-        self.lg.add_variable('stabilizer.roll', 'float')
-        self.lg.add_variable('stabilizer.pitch', 'float')
+        # self.lg.add_variable('stabilizer.roll', 'float')  # packet limit, need to add new logger if more info is needed
+        # self.lg.add_variable('stabilizer.pitch', 'float')
         self.lg.add_variable('pm.vbat', 'float')
 
         try:

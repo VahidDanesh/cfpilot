@@ -538,7 +538,7 @@ def simple_simulation(show_animation=True, animation_speed=0.01):
         # Update map based on sensor readings periodically (not every step)
         # This is where the drone "discovers" obstacles!
         if step % 3 == 0:  # Update map every 3 steps to reduce noise
-            cells_updated = update_map(grid_map, sensors, x, y, yaw, safety_margin=0.15)
+            cells_updated = update_map(grid_map, sensors, x, y, yaw, safety_margin=0.05)
         else:
             cells_updated = 0
         
