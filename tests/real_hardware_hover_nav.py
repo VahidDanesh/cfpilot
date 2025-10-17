@@ -1,11 +1,5 @@
 """
-Real Hardware Hover Navigation Example (Velocity + Hover Mode)
-
-Design goals:
-- Keep command state in self.hover (like refs/crazy-practical-2022/multiranger_pointcloud.py)
-- Background timer/thread sends hover commands at a fixed rate
-- Main loop only computes and updates self.hover (vx, vy, yaw, height)
-- Matplotlib visualizer (no PyQt) and simple map updates + D* Lite replanning
+Real Hardware Hover Navigation Example (Hover mode)
 """
 
 import time
@@ -71,7 +65,7 @@ def plan_path_with_dstar(grid_map, start_pos, goal_pos):
     return True, list(xs), list(ys)
 
 
-def update_map(grid_map, sensors, x, y, yaw, safety_margin=0.05):
+def update_map(grid_map, sensors, x, y, yaw, safety_margin=0.15):
     dirs = {'front': 0, 'right': -np.pi/2, 'back': np.pi, 'left': np.pi/2}
     cells_updated = 0
     for d, dist in sensors.items():
@@ -114,8 +108,6 @@ class HoverTimer:
             self.cf.commander.send_stop_setpoint()
             time.sleep(0.1)
             self.cf.commander.send_notify_setpoint_stop()
-            time.sleep(0.1)
-            self.cf.close_link()
         except Exception:
             pass
 
@@ -160,6 +152,7 @@ class RealHardwareHoverNav:
         self.searching_speed = searching_speed
         self.flight_height = flight_height
         self.control_rate_hz = control_rate_hz
+        self.safety_margin = 0.15
 
         self.current_x = self.start[0]
         self.current_y = self.start[1]
@@ -264,7 +257,7 @@ class RealHardwareHoverNav:
     def update_map_if_needed(self, step):
         if step % 3 != 0:
             return 0
-        return update_map(self.grid_map, self.sensor_readings, self.current_x, self.current_y, self.current_yaw, safety_margin=0.05)
+        return update_map(self.grid_map, self.sensor_readings, self.current_x, self.current_y, self.current_yaw, safety_margin=self.safety_margin)
 
     def replan_if_blocked(self, cells_updated):
         if cells_updated == 0:
@@ -317,6 +310,29 @@ class RealHardwareHoverNav:
             self.visualizer.set_status(stuck=False, emergency=False, avoiding=(np.hypot(vx_avoid_w, vy_avoid_w) > 0.02))
             self.visualizer.render()
 
+    def hold_position(self, duration_s=1.0):
+        dt = 1.0 / self.control_rate_hz
+        steps = max(1, int(duration_s * self.control_rate_hz))
+        for _ in range(steps):
+            self.updateHover('x', 0.0)
+            self.updateHover('y', 0.0)
+            self.updateHover('yaw', 0.0)
+            self.updateHover('height', self.flight_height)
+            time.sleep(dt)
+
+    def gradual_land(self, duration_s=3.0):
+        dt = 1.0 / self.control_rate_hz
+        steps = max(1, int(duration_s * self.control_rate_hz))
+        with self._hover_lock:
+            start_z = float(self.hover.get('height', self.flight_height))
+        for i in range(steps):
+            z = max(0.0, start_z * (1.0 - (i + 1) / steps))
+            self.updateHover('x', 0.0)
+            self.updateHover('y', 0.0)
+            self.updateHover('yaw', 0.0)
+            self.updateHover('height', z)
+            time.sleep(dt)
+
     # ---- Main ----
 
     def run(self, show_visualizer=True):
@@ -339,6 +355,9 @@ class RealHardwareHoverNav:
             self.updateHover('yaw', 0.0)
             self.updateHover('height', self.flight_height)
 
+            # Hold after takeoff before moving
+            self.hold_position(duration_s=1.0)
+
             # Initial planning
             self.plan_initial_path()
 
@@ -348,9 +367,12 @@ class RealHardwareHoverNav:
             step = 0
 
             while self.mission_active:
-                # Goal check (simple)
-                if np.hypot(self.goal[0] - self.current_x, self.goal[1] - self.current_y) < 0.05:
-                    print('Goal reached')
+                # Precise goal arrival and landing
+                dist_to_goal = np.hypot(self.goal[0] - self.current_x, self.goal[1] - self.current_y)
+                if dist_to_goal < 0.02:
+                    self.hold_position(duration_s=2.0)
+                    self.gradual_land(duration_s=3.0)
+                    print('Landed')
                     break
 
                 # Sensors
