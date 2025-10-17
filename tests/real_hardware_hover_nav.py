@@ -22,6 +22,23 @@ from cfpilot.mapping import GridMap
 from cfpilot.planning.DStarLite.d_star_lite import DStarLite
 
 
+class PositionFilter:
+    def __init__(self, alpha=0.4):
+        self.alpha = alpha
+        self.fx = None
+        self.fy = None
+
+    def update(self, x, y):
+        if self.fx is None:
+            self.fx, self.fy = float(x), float(y)
+        else:
+            self.fx = self.alpha * float(x) + (1 - self.alpha) * self.fx
+            self.fy = self.alpha * float(y) + (1 - self.alpha) * self.fy
+        return self.fx, self.fy
+
+    def reset(self, x, y):
+        self.fx, self.fy = float(x), float(y)
+
 def world_to_body(vx_w, vy_w, yaw_rad):
     cy, sy = np.cos(yaw_rad), np.sin(yaw_rad)
     vx_b =  cy * vx_w + sy * vy_w  # body x forward
@@ -85,13 +102,14 @@ def update_map(grid_map, sensors, x, y, yaw, safety_margin=0.15):
 class HoverTimer:
     """Fixed-rate sender for hover setpoints using self.hover state."""
 
-    def __init__(self, cf, rate_hz=50.0, hover_state=None, lock=None):
+    def __init__(self, cf, rate_hz=50.0, hover_state=None, lock=None, max_speed=None):
         self.cf = cf
         self.period = 1.0 / rate_hz
         self.hover = hover_state
         self._lock = lock
         self._running = False
         self._thread = None
+        self._max_speed = max_speed  # m/s (None means no clamp)
 
     def start(self):
         if self._running:
@@ -124,6 +142,13 @@ class HoverTimer:
             finally:
                 if self._lock:
                     self._lock.release()
+            # Clamp speed if configured
+            if self._max_speed is not None:
+                speed = (vx * vx + vy * vy) ** 0.5
+                if speed > 1e-6 and speed > self._max_speed:
+                    scale = self._max_speed / speed
+                    vx *= scale
+                    vy *= scale
             try:
                 self.cf.commander.send_hover_setpoint(vx, vy, yaw, h)
             except Exception:
@@ -153,6 +178,8 @@ class RealHardwareHoverNav:
         self.flight_height = flight_height
         self.control_rate_hz = control_rate_hz
         self.safety_margin = 0.15
+        self.near_obstacle_dist = 0.5
+        self.max_speed_near_obstacle = 0.15
 
         self.current_x = self.start[0]
         self.current_y = self.start[1]
@@ -180,6 +207,7 @@ class RealHardwareHoverNav:
         self.hover_timer = None
 
         self.mission_active = False
+        self.target_filter = PositionFilter(alpha=0.4)
 
     # ---- Callbacks / IO ----
 
@@ -202,9 +230,18 @@ class RealHardwareHoverNav:
     def sendHoverCommand(self):
         # Provided for API parity; real sending is done by HoverTimer
         with self._hover_lock:
-            self.controller.cf.commander.send_hover_setpoint(
-                self.hover['x'], self.hover['y'], self.hover['yaw'], self.hover['height']
-            )
+            vx = float(self.hover['x'])
+            vy = float(self.hover['y'])
+            yaw = float(self.hover['yaw'])
+            h = float(self.hover['height'])
+        # Clamp speed for safety before sending
+        speed = (vx * vx + vy * vy) ** 0.5
+        max_speed = getattr(self, 'max_speed_near_obstacle', None)
+        if max_speed is not None and speed > 1e-6 and speed > max_speed:
+            scale = max_speed / speed
+            vx *= scale
+            vy *= scale
+        self.controller.cf.commander.send_hover_setpoint(vx, vy, yaw, h)
 
     # ---- Setup / Teardown ----
 
@@ -226,7 +263,13 @@ class RealHardwareHoverNav:
         self.visualizer.setup(start=self.start, goal=self.goal, grid_map=self.grid_map)
 
     def start_hover_timer(self):
-        self.hover_timer = HoverTimer(self.controller.cf, rate_hz=self.control_rate_hz, hover_state=self.hover, lock=self._hover_lock)
+        self.hover_timer = HoverTimer(
+            self.controller.cf,
+            rate_hz=self.control_rate_hz,
+            hover_state=self.hover,
+            lock=self._hover_lock,
+            max_speed=self.max_speed_near_obstacle  # global safety clamp
+        )
         self.hover_timer.start()
 
     def stop_hover_timer(self):
@@ -241,6 +284,10 @@ class RealHardwareHoverNav:
             raise RuntimeError('Initial planning failed')
         if self.visualizer:
             self.visualizer.update_path(self.waypoints_x, self.waypoints_y)
+        if self.waypoints_x:
+            self.target_filter.reset(self.waypoints_x[0], self.waypoints_y[0])
+        else:
+            self.target_filter.reset(self.goal[0], self.goal[1])
 
     def update_sensors(self):
         if not self.multiranger:
@@ -275,6 +322,8 @@ class RealHardwareHoverNav:
                 self.waypoint_idx = 0
                 if self.visualizer:
                     self.visualizer.update_path(self.waypoints_x, self.waypoints_y)
+                if self.waypoints_x:
+                    self.target_filter.reset(self.waypoints_x[0], self.waypoints_y[0])
 
     # ---- Command Computation ----
 
@@ -291,11 +340,24 @@ class RealHardwareHoverNav:
         else:
             target = self.goal
 
+        # Filtered target to avoid sudden changes
+        ftx, fty = self.target_filter.update(target[0], target[1])
+
         # World-frame velocities
-        vx_path_w, vy_path_w = compute_path_velocity((self.current_x, self.current_y), target, self.cruise_speed)
+        vx_path_w, vy_path_w = compute_path_velocity((self.current_x, self.current_y), (ftx, fty), self.cruise_speed)
         vx_avoid_w, vy_avoid_w = compute_avoidance_velocity(self.sensor_readings, self.current_yaw, danger_dist=0.6, gain=0.3)
         vx_w = vx_path_w + vx_avoid_w
         vy_w = vy_path_w + vy_avoid_w
+
+        # Limit velocity near obstacles
+        dists = [d for d in [self.sensor_readings.get('front'), self.sensor_readings.get('back'), self.sensor_readings.get('left'), self.sensor_readings.get('right')] if d is not None]
+        min_dist = min(dists) if dists else None
+        if min_dist is not None and min_dist < self.near_obstacle_dist:
+            speed = np.hypot(vx_w, vy_w)
+            if speed > 1e-6 and speed > self.max_speed_near_obstacle:
+                scale = self.max_speed_near_obstacle / speed
+                vx_w *= scale
+                vy_w *= scale
 
         # Convert to body frame and keep yaw at 0 deg/s
         vx_b, vy_b = world_to_body(vx_w, vy_w, self.current_yaw)
