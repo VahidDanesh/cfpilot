@@ -235,8 +235,8 @@ class RealHardwareNavigationDemo:
         self.uri = self.controller.config['connection']['uri']
 
         # Navigation state
-        self.start = (0.0, 0.0)
-        self.goal = (2.0, 0.0)
+        self.start = (0.7, 1.5)
+        self.goal = (2.8, 1.5)  
         self.flight_height = 0.5  # meters
         
         # Navigation parameters (configurable)
@@ -247,8 +247,8 @@ class RealHardwareNavigationDemo:
         self.goal_distance_threshold = 0.3  # Distance to switch to goal_speed
         
         # Current state (updated via controller callbacks)
-        self.current_x = 0.0
-        self.current_y = 0.0
+        self.current_x = self.start[0]
+        self.current_y = self.start[1]
         self.current_z = 0.0
         self.current_yaw = 0.0  # radians
         
@@ -256,10 +256,17 @@ class RealHardwareNavigationDemo:
         self.visualizer = None
         
         # Grid map for obstacle discovery
+        # Map spans from -2.0m to +2.0m (4.0m total)
+        # 82 cells × 0.05m = 4.1m (slightly larger for safety)
+
+        resolution = 0.05  # [m]
+        width = 5.0  # [m]
+        height = 3.0  # [m]
+
         self.grid_map = GridMap(
-            width=80, height=80,
-            resolution=0.05,
-            center_x=0.0, center_y=0.0
+            width=int(width / resolution), height=int(height / resolution),
+            resolution=resolution,
+            center_x=width / 2, center_y=height / 2
         )
         self.grid_map.occupy_boundaries(boundary_width=2)
         
@@ -345,8 +352,8 @@ class RealHardwareNavigationDemo:
         print(f"\n📡 Connecting to Crazyflie at {self.uri}...")
         
         # Connect using controller
-        self.controller.connect(self.uri, x=self.start[0], y=self.start[1], z=0.0, yaw=0.0)
-        
+        self.controller.connect(self.uri, x=self.current_x, y=self.current_y, z=self.current_z, yaw=self.current_yaw)
+        time.sleep(1.0)
         if not self.controller.wait_for_connection(timeout=10.0):
             print("❌ Connection failed!")
             return
@@ -361,13 +368,13 @@ class RealHardwareNavigationDemo:
             print("🔍 Initializing Multiranger sensors...")
             self.multiranger = Multiranger(self.controller.cf, rate_ms=100)
             self.multiranger.start()
-            time.sleep(2.0)  # Wait for sensors to stabilize
+            time.sleep(1.0)  # Wait for sensors to stabilize
             
             # Setup visualizer
             print("\n📊 Setting up visualizer...")
             self.visualizer = DroneNavigationVisualizer(
-                xlim=(-2, 2),
-                ylim=(-2, 2),
+                xlim=(0, 5),
+                ylim=(0, 3),
                 figsize=(12, 9),
                 animation_speed=0.05
             )
@@ -379,14 +386,18 @@ class RealHardwareNavigationDemo:
             
             # Take off
             print("\n🚁 Taking off...")
+            pos_before = (self.current_x, self.current_y, self.current_z)
             self._takeoff()
+            pos_after = (self.current_x, self.current_y, self.current_z)
             
+            print(f"   Position before: ({pos_before[0]:.3f}, {pos_before[1]:.3f}, {pos_before[2]:.3f})")
+            print(f"   Position after:  ({pos_after[0]:.3f}, {pos_after[1]:.3f}, {pos_after[2]:.3f})")
+
             # Plan initial path
             print("\n🛤️  Planning initial path...")
             path_found, self.waypoints_x, self.waypoints_y = plan_path_with_dstar(
                 self.grid_map, self.start, self.goal
             )
-            
             if not path_found:
                 print("❌ Could not find initial path!")
                 self._land()
@@ -410,8 +421,6 @@ class RealHardwareNavigationDemo:
             dt = 1.0 / control_rate
             max_iterations = 2000  # 100 seconds max
             
-            # Wait a moment for position to update after takeoff
-            time.sleep(0.5)
             
             # Initialize filter and tracking with current position
             self.pos_filter.reset(self.current_x, self.current_y)
@@ -615,9 +624,14 @@ class RealHardwareNavigationDemo:
             print(f"   Replanning events: {self.replans}")
             print(f"   Final position: ({self.current_x:.2f}, {self.current_y:.2f})")
             print(f"   Distance to goal: {dist_to_goal:.2f}m")
-            
+        
+        except Exception as e:
+            print(f"\n❌ Error during mission: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             # Cleanup
+
             print("\n🛑 Stopping mission...")
             self.mission_active = False
             
@@ -657,6 +671,9 @@ class RealHardwareNavigationDemo:
     
     def _takeoff(self):
         """Take off to flight height"""
+        print(f"   Target height: {self.flight_height}m")
+        print(f"   Target yaw: {self.target_yaw}°")
+        
         # Unlock thrust protection
         self.controller.cf.commander.send_setpoint(0, 0, 0, 0)
         time.sleep(0.1)
@@ -667,6 +684,7 @@ class RealHardwareNavigationDemo:
         dt = 1.0 / control_rate
         steps = int(takeoff_time * control_rate)
         
+        print(f"   Taking off over {takeoff_time}s...")
         for i in range(steps):
             z = (i / steps) * self.flight_height
             # Use target yaw throughout takeoff
@@ -674,15 +692,16 @@ class RealHardwareNavigationDemo:
                 self.start[0], self.start[1], z, self.target_yaw
             )
             time.sleep(dt)
-        
+
         # Hold position at target yaw
+        print(f"   Stabilizing at {self.flight_height}m...")
         for _ in range(20):
             self.controller.cf.commander.send_position_setpoint(
-                self.current_x, self.current_y, self.flight_height, self.target_yaw
+                self.start[0], self.start[1], self.flight_height, self.target_yaw
             )
             time.sleep(dt)
         
-        print(f"✅ Takeoff complete at height {self.flight_height}m, yaw={self.target_yaw}°")
+        print(f"   ✅ Takeoff complete")
     
     def _land(self):
         """Land at current position"""
@@ -705,7 +724,7 @@ class RealHardwareNavigationDemo:
         self.controller.cf.commander.send_stop_setpoint()
         time.sleep(0.1)
         self.controller.cf.commander.send_notify_setpoint_stop()
-        time.sleep(0.)
+        time.sleep(0.5)
         print("✅ Landing complete")
 
 
