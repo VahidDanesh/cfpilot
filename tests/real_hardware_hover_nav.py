@@ -172,19 +172,21 @@ class RealHardwareHoverNav:
 
         self.start = (0.7, 1.5)
         self.goal = (2.8, 1.5)
+        self.current_x = self.start[0]
+        self.current_y = self.start[1]
+        self.current_z = 0.1
+        self.current_yaw = 0.0  # radians
+
 
         self.cruise_speed = cruise_speed
         self.searching_speed = searching_speed
         self.flight_height = flight_height
         self.control_rate_hz = control_rate_hz
-        self.safety_margin = 0.15
-        self.near_obstacle_dist = 0.5
-        self.max_speed_near_obstacle = 0.15
+        self.safety_margin = 0.05 # This will add extra obstacle margin in meters
+        self.near_obstacle_dist = 0.5 # m to start repulsion from obstacles
+        self.max_speed_near_obstacle = 0.15 # m/s max speed when near obstacles
 
-        self.current_x = self.start[0]
-        self.current_y = self.start[1]
-        self.current_z = 0.0
-        self.current_yaw = 0.0  # radians
+
 
         self.grid_map = GridMap(
             width=int(5.0 / 0.05), height=int(3.0 / 0.05),
@@ -222,10 +224,7 @@ class RealHardwareHoverNav:
 
     def updateHover(self, k, v):
         with self._hover_lock:
-            if k != 'height':
-                self.hover[k] = float(v)
-            else:
-                self.hover[k] = float(v)  # absolute height value (no clamp by request)
+            self.hover[k] = v
 
     def sendHoverCommand(self):
         # Provided for API parity; real sending is done by HoverTimer
@@ -243,11 +242,25 @@ class RealHardwareHoverNav:
             vy *= scale
         self.controller.cf.commander.send_hover_setpoint(vx, vy, yaw, h)
 
+    def send_position_setpoint(self, x, y, z, yaw, duration_s=1.0):
+
+        """
+        Control mode where the position is sent as an absolute (world) value.
+
+        position [x, y, z] are in m
+        yaw is in degrees
+        """
+        dt = 1.0 / self.control_rate_hz
+        steps = max(1, int(duration_s * self.control_rate_hz))
+        for i in range(steps):
+            self.controller.cf.commander.send_position_setpoint(x, y, z, yaw)
+            time.sleep(dt)
+        
     # ---- Setup / Teardown ----
 
     def connect_cf(self):
         cflib.crtp.init_drivers()
-        self.controller.connect(self.uri, x=self.current_x, y=self.current_y, z=self.current_z, yaw=self.current_yaw)
+        self.controller.connect(self.uri, x=self.start[0], y=self.start[1], z=self.current_z, yaw=self.current_yaw)
         if not self.controller.wait_for_connection(timeout=10.0):
             raise RuntimeError('Connection failed')
         self.controller.add_data_callback(self.position_callback)
@@ -304,7 +317,12 @@ class RealHardwareHoverNav:
     def update_map_if_needed(self, step):
         if step % 3 != 0:
             return 0
-        return update_map(self.grid_map, self.sensor_readings, self.current_x, self.current_y, self.current_yaw, safety_margin=self.safety_margin)
+        return update_map(self.grid_map, 
+                          self.sensor_readings, 
+                          self.current_x, 
+                          self.current_y, 
+                          self.current_yaw, 
+                          safety_margin=self.safety_margin)
 
     def replan_if_blocked(self, cells_updated):
         if cells_updated == 0:
@@ -317,7 +335,9 @@ class RealHardwareHoverNav:
             return
         val = self.grid_map.get_value_from_xy_index(ix, iy)
         if val is not None and val > 0.5:
-            ok, self.waypoints_x, self.waypoints_y = plan_path_with_dstar(self.grid_map, (self.current_x, self.current_y), self.goal)
+            ok, self.waypoints_x, self.waypoints_y = plan_path_with_dstar(self.grid_map, 
+                                                                          (self.current_x, self.current_y), 
+                                                                          self.goal)
             if ok:
                 self.waypoint_idx = 0
                 if self.visualizer:
@@ -345,7 +365,11 @@ class RealHardwareHoverNav:
 
         # World-frame velocities
         vx_path_w, vy_path_w = compute_path_velocity((self.current_x, self.current_y), (ftx, fty), self.cruise_speed)
-        vx_avoid_w, vy_avoid_w = compute_avoidance_velocity(self.sensor_readings, self.current_yaw, danger_dist=0.6, gain=0.3)
+
+        vx_avoid_w, vy_avoid_w = compute_avoidance_velocity(self.sensor_readings, 
+                                                            self.current_yaw, 
+                                                            danger_dist=self.near_obstacle_dist, 
+                                                            gain=0.5)
         vx_w = vx_path_w + vx_avoid_w
         vy_w = vy_path_w + vy_avoid_w
 
@@ -382,13 +406,28 @@ class RealHardwareHoverNav:
             self.updateHover('height', self.flight_height)
             time.sleep(dt)
 
+
+    def takeoff(self, duration_s=3.0):
+        dt = 1.0 / self.control_rate_hz
+        steps = max(1, int(duration_s * self.control_rate_hz))
+        with self._hover_lock:
+            start_z = float(self.hover.get('height', 0.0))
+        for i in range(steps):
+            z = start_z + (self.flight_height - start_z) * (i + 1) / steps
+            print(f'Takeoff step {i+1}/{steps}, height={z:.2f} m')
+            self.updateHover('x', 0.0)
+            self.updateHover('y', 0.0)
+            self.updateHover('yaw', 0.0)
+            self.updateHover('height', z)
+            time.sleep(dt)
+
     def gradual_land(self, duration_s=3.0):
         dt = 1.0 / self.control_rate_hz
         steps = max(1, int(duration_s * self.control_rate_hz))
         with self._hover_lock:
             start_z = float(self.hover.get('height', self.flight_height))
         for i in range(steps):
-            z = max(0.0, start_z * (1.0 - (i + 1) / steps))
+            z = max(0.2, start_z * (1.0 - (i + 1) / steps))
             self.updateHover('x', 0.0)
             self.updateHover('y', 0.0)
             self.updateHover('yaw', 0.0)
@@ -412,13 +451,11 @@ class RealHardwareHoverNav:
             self.start_hover_timer()
 
             # Set initial hover commands (height set elsewhere as absolute)
-            self.updateHover('x', 0.0)
-            self.updateHover('y', 0.0)
-            self.updateHover('yaw', 0.0)
-            self.updateHover('height', self.flight_height)
+            self.takeoff(duration_s=3.0)
 
             # Hold after takeoff before moving
-            self.hold_position(duration_s=1.0)
+            # self.hold_position(duration_s=1.0)
+            # self.send_position_setpoint(self.start[0], self.start[1], self.flight_height, 0.0, duration_s=1.0)
 
             # Initial planning
             self.plan_initial_path()
@@ -432,8 +469,8 @@ class RealHardwareHoverNav:
                 # Precise goal arrival and landing
                 dist_to_goal = np.hypot(self.goal[0] - self.current_x, self.goal[1] - self.current_y)
                 if dist_to_goal < 0.02:
-                    self.hold_position(duration_s=2.0)
-                    self.gradual_land(duration_s=3.0)
+                    self.send_position_setpoint(self.goal[0], self.goal[1], self.flight_height, 0.0, duration_s=1.0)
+                    self.gradual_land(duration_s=2.0)
                     print('Landed')
                     break
 
@@ -459,6 +496,7 @@ class RealHardwareHoverNav:
         finally:
             self.mission_active = False
             self.stop_hover_timer()
+            self.controller.cleanup()
             if self.multiranger:
                 try:
                     self.multiranger.stop()

@@ -395,7 +395,8 @@ def simple_simulation(show_animation=True, animation_speed=0.01):
         (1.5, 1.8, 0.25),
         (2.5, 0.8, 0.25),
         (2.5, 2.0, 0.25),
-        (3.5, 1.8, 0.25),
+        (3.0, 1.4, 0.35),
+        (3.5, 1.8, 0.35),
 
     ]
     
@@ -458,7 +459,7 @@ def simple_simulation(show_animation=True, animation_speed=0.01):
     replan_positions = []
     
     # Initialize position filter for smooth commands
-    pos_filter = PositionFilter(alpha=0.4)  # 40% new, 60% old (smooth but responsive)
+    pos_filter = PositionFilter(alpha=0.3)  # 40% new, 60% old (smooth but responsive)
     pos_filter.reset(x, y)
     
     waypoint_idx = 0
@@ -605,7 +606,7 @@ def simple_simulation(show_animation=True, animation_speed=0.01):
             target_x, target_y = waypoints_x[waypoint_idx], waypoints_y[waypoint_idx]
             
             # Check if reached waypoint
-            if np.hypot(target_x - x, target_y - y) < 0.12:  # Larger tolerance
+            if np.hypot(target_x - x, target_y - y) < 0.05:  # Larger tolerance
                 waypoint_idx += 1
                 stuck_counter = 0  # Reset stuck counter
                 if waypoint_idx % 5 == 0:  # Print progress every 5 waypoints
