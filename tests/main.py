@@ -82,15 +82,14 @@ def compute_avoidance_velocity(sensors, yaw_rad, danger_dist=0.6, gain=0.3, hyst
             continue
         # Smooth force falloff
         force = (effective_danger_dist - dist) / effective_danger_dist
-        force = force * force
-        ang = yaw_rad + angles[d] + np.pi  # away from obstacle
-        rx += force * np.cos(ang)
-        ry += force * np.sin(ang)
+        ang = yaw_rad + angles[d]
+        rx -= force * np.cos(ang)
+        ry -= force * np.sin(ang)
     
     # Larger deadzone to prevent micro-movements
-    if abs(rx) < 0.02:
+    if abs(rx) < 0.05:
         rx = 0.0
-    if abs(ry) < 0.02:
+    if abs(ry) < 0.05:
         ry = 0.0
     return gain * rx, gain * ry
 
@@ -107,7 +106,7 @@ def update_map(grid_map, sensors, x, y, yaw, safety_margin=0.15):
     dirs = {'front': 0, 'right': -np.pi/2, 'back': np.pi, 'left': np.pi/2}
     cells_updated = 0
     for d, dist in sensors.items():
-        if dist is None or dist > 2.0 or dist < 0.05:
+        if dist is None or dist > 2.0 or dist < 0.02:
             continue
         ang = yaw + dirs[d]
         ox = x + dist * np.cos(ang)
@@ -196,7 +195,7 @@ class RealHardwareHoverNav:
     WAYPOINT_ACCEPTANCE_RADIUS = 0.15  # m
     TARGET_ARRIVAL_THRESHOLD = 0.02    # m
     MIN_HEIGHT = 0.2                   # m - minimum safe height
-    MAP_UPDATE_INTERVAL = 10           # steps between map updates
+    MAP_UPDATE_INTERVAL = 5           # steps between map updates
     
     def __init__(self,
                  cruise_speed=0.2,     # m/s along path
@@ -206,7 +205,7 @@ class RealHardwareHoverNav:
         self.uri = self.controller.config['connection']['uri']
 
         self.start = (0.7, 1.5)
-        self.goal = (1.56, 1.5)
+        self.goal = (2.7, 1.5)
         self.current_x = self.start[0]
         self.current_y = self.start[1]
         self.current_z = 0.1
@@ -220,7 +219,7 @@ class RealHardwareHoverNav:
         self.flight_height = flight_height
         self.control_rate_hz = control_rate_hz
         self.safety_margin = 0.05              # m - extra obstacle margin
-        self.near_obstacle_dist = 0.5          # m - start repulsion distance
+        self.near_obstacle_dist = 0.2          # m - start repulsion distance
         self.max_speed_near_obstacle = 0.15    # m/s - max speed near obstacles
 
         self.grid_map = GridMap(
@@ -244,8 +243,8 @@ class RealHardwareHoverNav:
         self.hover_timer = None
 
         self.mission_active = False
-        self.target_filter = ExponentialFilter(alpha=0.6)  # Smooth target tracking
-        self.velocity_filter = ExponentialFilter(alpha=0.7, initial_x=0.0, initial_y=0.0)  # Smooth velocity commands
+        self.target_filter = ExponentialFilter(alpha=0.9)  # Smooth target tracking
+        self.velocity_filter = ExponentialFilter(alpha=0.9, initial_x=0.0, initial_y=0.0)  # Smooth velocity commands
 
     # ---- Callbacks / IO ----
 
@@ -622,7 +621,6 @@ class RealHardwareHoverNav:
 def main():
     demo = RealHardwareHoverNav(
         cruise_speed=0.3,  # Reduced from 0.5 for smoother, more stable flight
-        searching_speed=0.1,
         flight_height=0.5,
         control_rate_hz=50.0
     )
