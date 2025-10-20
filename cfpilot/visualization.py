@@ -318,6 +318,8 @@ class DroneNavigationVisualizer:
         self.avoidance_arrows = []
         self.discovered_map = None
         self.replan_markers = None
+        self.detected_edges_scatter = None
+        self.pad_center_marker = None
         
         # State tracking
         self.trajectory_x = []
@@ -331,6 +333,10 @@ class DroneNavigationVisualizer:
         self.replan_positions = []
         self.step_counter = 0
         self.status_flags = {'stuck': False, 'emergency': False, 'avoiding': False}
+        
+        # Landing pad detection
+        self.detected_edges = []
+        self.pad_center = None
         
         # Map and environment
         self.grid_map = None
@@ -455,6 +461,17 @@ class DroneNavigationVisualizer:
         """
         self.repulsion_force = (rep_x, rep_y)
     
+    def update_detected_edges(self, edge_positions, pad_center=None):
+        """
+        Update detected landing pad edges and calculated center
+        
+        Args:
+            edge_positions: List of (x, y) tuples representing detected edges
+            pad_center: (x, y) tuple for calculated pad center (optional)
+        """
+        self.detected_edges = edge_positions if edge_positions else []
+        self.pad_center = pad_center
+    
     def mark_replan(self, x=None, y=None):
         """
         Mark a replanning event at current or specified position
@@ -551,6 +568,30 @@ class DroneNavigationVisualizer:
                                                 alpha=0.6, vmin=0, vmax=1,
                                                 origin='lower', extent=extent, zorder=1)
         
+        # Draw detected landing pad edges
+        if self.detected_edges_scatter is not None:
+            self.detected_edges_scatter.remove()
+            self.detected_edges_scatter = None
+        
+        if self.detected_edges and len(self.detected_edges) > 0:
+            edge_x = [pos[0] for pos in self.detected_edges]
+            edge_y = [pos[1] for pos in self.detected_edges]
+            self.detected_edges_scatter = self.ax.scatter(edge_x, edge_y, 
+                                                         c='red', marker='x', s=100, 
+                                                         linewidths=2, zorder=12,
+                                                         label=f'Pad Edges ({len(self.detected_edges)})')
+        
+        # Draw calculated pad center
+        if self.pad_center_marker is not None:
+            self.pad_center_marker.remove()
+            self.pad_center_marker = None
+        
+        if self.pad_center is not None:
+            self.pad_center_marker = self.ax.scatter([self.pad_center[0]], [self.pad_center[1]], 
+                                                     c='lime', marker='*', s=400, 
+                                                     edgecolors='darkgreen', linewidths=2,
+                                                     zorder=13, label='Pad Center')
+        
         # Update title with status
         status = f'Step {self.step_counter} | Replans: {self.replans}'
         if self.status_flags['stuck']:
@@ -560,6 +601,10 @@ class DroneNavigationVisualizer:
         elif self.status_flags['avoiding']:
             status += ' | 🔄 AVOIDING'
         self.ax.set_title(status)
+        
+        # Update legend if detection elements are present
+        if self.detected_edges or self.pad_center:
+            self.ax.legend(loc='upper right', fontsize=9)
         
         plt.pause(self.animation_speed)
     
@@ -621,6 +666,10 @@ class DroneNavigationVisualizer:
         self.sensor_lines = []
         self.avoidance_arrows = []
         self.discovered_map = None
+        self.detected_edges = []
+        self.pad_center = None
+        self.detected_edges_scatter = None
+        self.pad_center_marker = None
         
         print("✅ Visualizer reset")
 

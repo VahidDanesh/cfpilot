@@ -284,7 +284,7 @@ class CrazyflieController:
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_file = log_dir / f"flight_log_{timestamp}.csv"
-        
+        self.logger.info(f"💾 Saving flight data to {log_file}")
         try:
             with open(log_file, 'w', newline='') as csvfile:
                 if self.flight_data:
@@ -296,6 +296,7 @@ class CrazyflieController:
             self.logger.info(f"🛜 Flight data saved to: {log_file}")
         except Exception as e:
             self.logger.error(f"❌ Failed to save flight data: {e}")
+        
     
     def cleanup(self) -> None:
         """Cleanup resources and save data"""

@@ -20,6 +20,7 @@ from cfpilot.controller import CrazyflieController
 from cfpilot.visualization import DroneNavigationVisualizer
 from cfpilot.mapping import GridMap
 from cfpilot.planning.DStarLite.d_star_lite import DStarLite
+from cfpilot.detection import LandingPadDetector, SearchPattern
 
 
 class PositionFilter:
@@ -164,7 +165,7 @@ class HoverTimer:
 class RealHardwareHoverNav:
     def __init__(self,
                  cruise_speed=0.2,     # m/s along path
-                 searching_speed=0.1,  # reserved for future landing search
+                 searching_speed=0.1,  # m/s during landing pad search
                  flight_height=0.5,
                  control_rate_hz=50.0):
         self.controller = CrazyflieController()
@@ -176,6 +177,7 @@ class RealHardwareHoverNav:
         self.current_y = self.start[1]
         self.current_z = 0.1
         self.current_yaw = 0.0  # radians
+        self.current_z_range = None  # z-range sensor reading
 
 
         self.cruise_speed = cruise_speed
@@ -186,7 +188,12 @@ class RealHardwareHoverNav:
         self.near_obstacle_dist = 0.5 # m to start repulsion from obstacles
         self.max_speed_near_obstacle = 0.15 # m/s max speed when near obstacles
 
-
+        # Landing pad detection parameters (TUNABLE)
+        self.landing_zone_radius = 0.1  # Distance to goal to trigger search (m)
+        self.search_area_size = 0.6     # Cross pattern search extent (m)
+        self.search_step_size = 0.3    # Distance to move in each direction (m)
+        self.pad_center_tolerance = 0.05  # How close to get to calculated center (m)
+        self.search_timeout = 60.0      # Max search time (seconds)
 
         self.grid_map = GridMap(
             width=int(5.0 / 0.05), height=int(3.0 / 0.05),
@@ -210,6 +217,26 @@ class RealHardwareHoverNav:
 
         self.mission_active = False
         self.target_filter = PositionFilter(alpha=0.4)
+
+        # Landing pad detection
+        self.detector = LandingPadDetector()
+        self.search_pattern = SearchPattern()
+        
+        # Configure detection for 0.3x0.3m pad at 0.1m height
+        self.detector.configure_detection({
+            'lag': 8,
+            'threshold': 1.5,      # TUNABLE: 1.0-2.5
+            'influence': 0.2,      # TUNABLE: 0.1-0.3
+            'min_peak_height': 0.05  # TUNABLE: 0.03-0.08 (pad is 0.1m high)
+        })
+
+        # Mission state machine
+        self.mission_state = 'NAVIGATING'  # NAVIGATING, SEARCHING, CENTERING, LANDING
+        self.search_waypoints = []
+        self.search_waypoint_idx = 0
+        self.search_start_time = None
+        self.calculated_pad_center = None
+        self.detected_edges = []
 
     # ---- Callbacks / IO ----
 
@@ -311,6 +338,9 @@ class RealHardwareHoverNav:
             'left': self.multiranger.left,
             'right': self.multiranger.right
         }
+        # Update z-range for landing pad detection
+        self.current_z_range = self.multiranger.down
+        
         if self.visualizer and self.visualizer.is_setup:
             self.visualizer.update_sensors(self.sensor_readings)
 
@@ -345,26 +375,168 @@ class RealHardwareHoverNav:
                 if self.waypoints_x:
                     self.target_filter.reset(self.waypoints_x[0], self.waypoints_y[0])
 
+    # ---- Landing Pad Detection ----
+
+    def generate_cross_search_pattern(self, center):
+        """Generate cross pattern: center -> forward -> back -> center -> left -> right"""
+        cx, cy = center
+        waypoints = []
+        
+        # Start at center
+        waypoints.append((cx, cy, 'center'))
+        num_steps = int(self.search_area_sizQe / self.search_step_size)
+
+        
+        # Forward pass (positive x direction)
+        for i in range(1, num_steps + 1):
+            waypoints.append((cx + i * self.search_step_size, cy, 'forward'))
+
+        # Backward pass (negative x direction)
+        for i in range(1, num_steps + 1):
+            waypoints.append((cx - i * self.search_step_size, cy, 'back'))    
+
+        # Back to center
+        waypoints.append((cx, cy, 'center'))
+
+        # Left pass (positive y direction)
+        for i in range(1, num_steps + 1):
+            waypoints.append((cx, cy + i * self.search_step_size, 'left'))
+        
+        
+        # Right pass (negative y direction)
+        for i in range(1, num_steps + 1):
+            waypoints.append((cx, cy - i * self.search_step_size, 'right'))
+        
+        # Back to center
+        waypoints.append((cx, cy, 'center'))
+
+        
+        print(f"Generated cross search pattern with {len(waypoints)} waypoints")
+        return waypoints
+
+    def start_search_mode(self):
+        """Initialize search mode"""
+        print(f"Starting search mode at ({self.current_x:.3f}, {self.current_y:.3f})")
+        self.mission_state = 'SEARCHING'
+        self.search_start_time = time.time()
+        
+        # Generate search pattern around current position (landing zone)
+        self.search_waypoints = self.generate_cross_search_pattern((self.current_x, self.current_y))
+        self.search_waypoint_idx = 0
+        
+        # Start detection
+        self.detector.start_detection()
+        self.detected_edges = []
+
+    def process_detection(self):
+        """Process height measurement for landing pad detection"""
+        if self.mission_state != 'SEARCHING':
+            return
+        
+        if self.current_z_range is None or self.current_z_range < 0.05 or self.current_z_range > 1.0:
+            return
+        
+        # Calculate height (flight_height - z_range gives height above surface)
+        surface_height = self.flight_height - self.current_z_range
+        
+        # Get current search direction
+        if self.search_waypoint_idx < len(self.search_waypoints):
+            direction = self.search_waypoints[self.search_waypoint_idx][2]
+            self.detector.set_flight_direction(direction)
+        
+        # Process measurement
+        self.detector.process_height_measurement(surface_height, (self.current_x, self.current_y))
+        
+        # Update detected edges list for visualization
+        self.detected_edges = [p['position'] for p in self.detector.peak_positions]
+
+    def check_search_completion(self):
+        """Check if search should end and calculate pad center"""
+        if self.mission_state != 'SEARCHING':
+            return False
+        
+        # Check timeout
+        if time.time() - self.search_start_time > self.search_timeout:
+            print("Search timeout reached")
+            return self.finalize_search()
+        
+        # Check if all waypoints visited
+        if self.search_waypoint_idx >= len(self.search_waypoints):
+            print("Search pattern complete")
+            return self.finalize_search()
+        
+        return False
+
+    def finalize_search(self):
+        """Finalize search and calculate pad center"""
+        self.detector.stop_detection()
+        stats = self.detector.get_detection_statistics()
+        print(f"Detection stats: {stats['total_border_points']} edges detected")
+        
+        # Try to calculate center
+        center = self.detector.calculate_pad_center()
+        
+        if center and self.detector.is_ready_for_landing():
+            self.calculated_pad_center = center
+            print(f"Pad center calculated: ({center[0]:.3f}, {center[1]:.3f}), "
+                  f"confidence: {self.detector.center_confidence:.2f}")
+            self.mission_state = 'CENTERING'
+            return True
+        else:
+            print(f"Detection failed or low confidence. Landing at goal position.")
+            self.calculated_pad_center = self.goal
+            self.mission_state = 'CENTERING'
+            return True
+
     # ---- Command Computation ----
 
     def compute_and_update_hover(self):
-        # Waypoint handling
-        if self.waypoint_idx < len(self.waypoints_x):
-            tx, ty = self.waypoints_x[self.waypoint_idx], self.waypoints_y[self.waypoint_idx]
-            if np.hypot(tx - self.current_x, ty - self.current_y) < 0.12:
-                self.waypoint_idx += 1
+        # Determine target and speed based on mission state
+        if self.mission_state == 'NAVIGATING':
+            # Normal path following
+            if self.waypoint_idx < len(self.waypoints_x):
+                tx, ty = self.waypoints_x[self.waypoint_idx], self.waypoints_y[self.waypoint_idx]
+                if np.hypot(tx - self.current_x, ty - self.current_y) < 0.12:
+                    self.waypoint_idx += 1
 
-        # Select target
-        if self.waypoint_idx < len(self.waypoints_x):
-            target = (self.waypoints_x[self.waypoint_idx], self.waypoints_y[self.waypoint_idx])
+            if self.waypoint_idx < len(self.waypoints_x):
+                target = (self.waypoints_x[self.waypoint_idx], self.waypoints_y[self.waypoint_idx])
+            else:
+                target = self.goal
+            
+            current_speed = self.cruise_speed
+
+        elif self.mission_state == 'SEARCHING':
+            # Follow search pattern
+            if self.search_waypoint_idx < len(self.search_waypoints):
+                tx, ty, _ = self.search_waypoints[self.search_waypoint_idx]
+                if np.hypot(tx - self.current_x, ty - self.current_y) < 0.08:
+                    self.search_waypoint_idx += 1
+                target = (tx, ty)
+            else:
+                target = (self.current_x, self.current_y)  # Hold position
+            
+            current_speed = self.searching_speed
+
+        elif self.mission_state == 'CENTERING':
+            # Move to calculated pad center
+            if self.calculated_pad_center:
+                target = self.calculated_pad_center
+                current_speed = self.searching_speed
+            else:
+                target = self.goal
+                current_speed = self.searching_speed
+        
         else:
-            target = self.goal
+            # Default: hold position
+            target = (self.current_x, self.current_y)
+            current_speed = 0.0
 
         # Filtered target to avoid sudden changes
         ftx, fty = self.target_filter.update(target[0], target[1])
 
         # World-frame velocities
-        vx_path_w, vy_path_w = compute_path_velocity((self.current_x, self.current_y), (ftx, fty), self.cruise_speed)
+        vx_path_w, vy_path_w = compute_path_velocity((self.current_x, self.current_y), (ftx, fty), current_speed)
 
         vx_avoid_w, vy_avoid_w = compute_avoidance_velocity(self.sensor_readings, 
                                                             self.current_yaw, 
@@ -394,6 +566,10 @@ class RealHardwareHoverNav:
         if self.visualizer:
             self.visualizer.update_repulsion(vx_avoid_w, vy_avoid_w)
             self.visualizer.set_status(stuck=False, emergency=False, avoiding=(np.hypot(vx_avoid_w, vy_avoid_w) > 0.02))
+            
+            # Show detected edges and calculated center
+            self.visualizer.update_detected_edges(self.detected_edges, self.calculated_pad_center)
+            
             self.visualizer.render()
 
     def hold_position(self, duration_s=1.0):
@@ -407,19 +583,12 @@ class RealHardwareHoverNav:
             time.sleep(dt)
 
 
-    def takeoff(self, duration_s=3.0):
-        dt = 1.0 / self.control_rate_hz
-        steps = max(1, int(duration_s * self.control_rate_hz))
-        with self._hover_lock:
-            start_z = float(self.hover.get('height', 0.0))
-        for i in range(steps):
-            z = start_z + (self.flight_height - start_z) * (i + 1) / steps
-            print(f'Takeoff step {i+1}/{steps}, height={z:.2f} m')
-            self.updateHover('x', 0.0)
-            self.updateHover('y', 0.0)
-            self.updateHover('yaw', 0.0)
-            self.updateHover('height', z)
-            time.sleep(dt)
+    def takeoff(self):
+        self.updateHover('x', 0.0)
+        self.updateHover('y', 0.0)
+        self.updateHover('yaw', 0.0)
+        self.updateHover('height', self.flight_height)
+
 
     def gradual_land(self, duration_s=3.0):
         dt = 1.0 / self.control_rate_hz
@@ -451,38 +620,74 @@ class RealHardwareHoverNav:
             self.start_hover_timer()
 
             # Set initial hover commands (height set elsewhere as absolute)
-            self.takeoff(duration_s=3.0)
+            self.takeoff()
 
             # Hold after takeoff before moving
             # self.hold_position(duration_s=1.0)
-            # self.send_position_setpoint(self.start[0], self.start[1], self.flight_height, 0.0, duration_s=1.0)
+            self.send_position_setpoint(self.start[0], self.start[1], self.flight_height, 0.0, duration_s=0.5)
 
             # Initial planning
             self.plan_initial_path()
 
-            # Main control loop
+            # Main control loop with state machine
             self.mission_active = True
             control_dt = 1.0 / self.control_rate_hz
             step = 0
 
             while self.mission_active:
-                # Precise goal arrival and landing
+                # State-based control
                 dist_to_goal = np.hypot(self.goal[0] - self.current_x, self.goal[1] - self.current_y)
-                if dist_to_goal < 0.02:
-                    self.send_position_setpoint(self.goal[0], self.goal[1], self.flight_height, 0.0, duration_s=1.0)
-                    self.gradual_land(duration_s=2.0)
-                    print('Landed')
-                    break
-
+                
+                # STATE TRANSITIONS
+                if self.mission_state == 'NAVIGATING':
+                    # Check if entered landing zone
+                    if dist_to_goal < self.landing_zone_radius:
+                        print(f"\n=== Entering landing zone (dist={dist_to_goal:.3f}m) ===")
+                        self.start_search_mode()
+                
+                elif self.mission_state == 'SEARCHING':
+                    # Process detection
+                    self.process_detection()
+                    
+                    # Check search completion
+                    if self.check_search_completion():
+                        print("=== Search complete, moving to pad center ===")
+                
+                elif self.mission_state == 'CENTERING':
+                    # Check if reached calculated center
+                    if self.calculated_pad_center:
+                        dist_to_center = np.hypot(self.calculated_pad_center[0] - self.current_x,
+                                                   self.calculated_pad_center[1] - self.current_y)
+                        if dist_to_center < self.pad_center_tolerance:
+                            print(f"=== Reached pad center, initiating landing ===")
+                            self.mission_state = 'LANDING'
+                            # Precision positioning before landing
+                            self.send_position_setpoint(self.calculated_pad_center[0], 
+                                                       self.calculated_pad_center[1], 
+                                                       self.flight_height, 0.0, duration_s=1.0)
+                            self.gradual_land(duration_s=2.0)
+                            print('Landed successfully on pad')
+                            break
+                
                 # Sensors
                 self.update_sensors()
 
-                # Map + optional simple replan
-                cells_updated = self.update_map_if_needed(step)
-                self.replan_if_blocked(cells_updated)
+                # Map + optional simple replan (only during NAVIGATING)
+                if self.mission_state == 'NAVIGATING':
+                    cells_updated = self.update_map_if_needed(step)
+                    self.replan_if_blocked(cells_updated)
 
                 # Compute and update hover velocities
                 self.compute_and_update_hover()
+
+                # Debug output every 2 seconds
+                if step % (self.control_rate_hz * 2) == 0:
+                    print(f"[{self.mission_state}] Pos: ({self.current_x:.2f}, {self.current_y:.2f}), "
+                          f"Dist to goal: {dist_to_goal:.2f}m, "
+                          f"Z-range: {self.current_z_range:.3f}m" if self.current_z_range else "Z-range: N/A")
+                    if self.mission_state == 'SEARCHING':
+                        print(f"  Search progress: {self.search_waypoint_idx}/{len(self.search_waypoints)}, "
+                              f"Edges detected: {len(self.detected_edges)}")
 
                 step += 1
                 time.sleep(control_dt)
@@ -511,7 +716,7 @@ class RealHardwareHoverNav:
 
 def main():
     demo = RealHardwareHoverNav(
-        cruise_speed=0.2,
+        cruise_speed=0.3,
         searching_speed=0.1,
         flight_height=0.5,
         control_rate_hz=50.0
