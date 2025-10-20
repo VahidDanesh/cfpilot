@@ -56,7 +56,20 @@ def compute_path_velocity(current_xy, target_xy, speed):
     return speed * dx / dist, speed * dy / dist
 
 
-def compute_avoidance_velocity(sensors, yaw_rad, danger_dist=0.6, gain=0.3):
+def compute_avoidance_velocity(sensors, yaw_rad, danger_dist=0.6, gain=0.3, min_threshold=0.01):
+    """
+    Compute obstacle avoidance velocity using repulsion forces.
+    
+    Args:
+        sensors: Dict with 'front', 'back', 'left', 'right' distance readings (m)
+        yaw_rad: Current yaw angle in radians
+        danger_dist: Distance threshold to start repulsion (m)
+        gain: Gain for repulsion force
+        min_threshold: Minimum force threshold to apply (m/s)
+    
+    Returns:
+        (vx, vy): Avoidance velocity in world frame (m/s)
+    """
     angles = {'front': 0.0, 'right': -np.pi/2, 'back': np.pi, 'left': np.pi/2}
     rx, ry = 0.0, 0.0
     for d in ['front', 'back', 'left', 'right']:
@@ -64,37 +77,72 @@ def compute_avoidance_velocity(sensors, yaw_rad, danger_dist=0.6, gain=0.3):
         if dist is None or dist > danger_dist:
             continue
         force = (danger_dist - dist) / danger_dist
-        force = force * force
-        ang = yaw_rad + angles[d] + np.pi  # away from obstacle
+        force = force * force  # Quadratic increase as obstacle gets closer
+        ang = yaw_rad + angles[d] + np.pi  # Point away from obstacle
         rx += force * np.cos(ang)
         ry += force * np.sin(ang)
-    if abs(rx) < 0.01:
+    
+    # Filter out very small forces
+    if abs(rx) < min_threshold:
         rx = 0.0
-    if abs(ry) < 0.01:
+    if abs(ry) < min_threshold:
         ry = 0.0
     return gain * rx, gain * ry
 
 
-def plan_path_with_dstar(grid_map, start_pos, goal_pos):
-    planner = DStarLite(grid_map, obstacle_threshold=0.5, show_animation=False)
+def plan_path_with_dstar(grid_map, start_pos, goal_pos, obstacle_threshold=0.5):
+    """
+    Plan a path using D* Lite algorithm.
+    
+    Args:
+        grid_map: GridMap instance
+        start_pos: (x, y) start position
+        goal_pos: (x, y) goal position
+        obstacle_threshold: Cell value threshold for obstacles
+    
+    Returns:
+        (success, xs, ys): Success flag and path coordinates
+    """
+    planner = DStarLite(grid_map, obstacle_threshold=obstacle_threshold, show_animation=False)
     ok, xs, ys = planner.run(start=start_pos, goal=goal_pos, simplify=True, smooth=True)
     if not ok or len(xs) == 0:
         return False, [], []
     return True, list(xs), list(ys)
 
 
-def update_map(grid_map, sensors, x, y, yaw, safety_margin=0.15):
+def update_map(grid_map, sensors, x, y, yaw, safety_margin=0.15, 
+               max_range=2.0, min_range=0.05, occupancy_value=1.0):
+    """
+    Update occupancy grid map with sensor readings.
+    
+    Args:
+        grid_map: GridMap instance
+        sensors: Dict with 'front', 'back', 'left', 'right' readings
+        x, y: Current drone position (m)
+        yaw: Current yaw angle (rad)
+        safety_margin: Extra margin around obstacles (m)
+        max_range: Maximum sensor range to use (m)
+        min_range: Minimum sensor range to use (m)
+        occupancy_value: Value to set for occupied cells
+    
+    Returns:
+        Number of cells updated
+    """
     dirs = {'front': 0, 'right': -np.pi/2, 'back': np.pi, 'left': np.pi/2}
     cells_updated = 0
+    margin_samples = 5  # Number of samples in margin grid
+    
     for d, dist in sensors.items():
-        if dist is None or dist > 2.0 or dist < 0.05:
+        if dist is None or dist > max_range or dist < min_range:
             continue
         ang = yaw + dirs[d]
         ox = x + dist * np.cos(ang)
         oy = y + dist * np.sin(ang)
-        for dx in np.linspace(-safety_margin, safety_margin, 5):
-            for dy in np.linspace(-safety_margin, safety_margin, 5):
-                ok = grid_map.set_value_from_xy_pos(ox + dx, oy + dy, 1.0)
+        
+        # Apply safety margin around detected obstacle
+        for dx in np.linspace(-safety_margin, safety_margin, margin_samples):
+            for dy in np.linspace(-safety_margin, safety_margin, margin_samples):
+                ok = grid_map.set_value_from_xy_pos(ox + dx, oy + dy, occupancy_value)
                 if ok:
                     cells_updated += 1
     return cells_updated
@@ -163,75 +211,170 @@ class HoverTimer:
 
 
 class RealHardwareHoverNav:
+    """
+    ========================================
+    CONFIGURATION PARAMETERS
+    ========================================
+    All tunable constants are defined here for easy access and modification.
+    """
+    
+    # ---- Mission Parameters ----
+    START_POSITION = (0.7, 1.5)              # Starting position (x, y) in meters
+    GOAL_POSITION = (1.6, 1.5)               # Goal/landing zone position (x, y) in meters
+    INITIAL_Z = 0.1                          # Initial Z estimate in meters
+    INITIAL_YAW = 0.0                        # Initial yaw in radians
+    
+    # ---- Flight Parameters ----
+    DEFAULT_CRUISE_SPEED = 0.7               # Normal navigation speed (m/s)
+    DEFAULT_SEARCHING_SPEED = 0.2            # Speed during landing pad search (m/s)
+    DEFAULT_FLIGHT_HEIGHT = 0.5              # Flight altitude (m)
+    DEFAULT_CONTROL_RATE_HZ = 50.0           # Control loop frequency (Hz)
+    
+    # ---- Navigation Parameters ----
+    NAV_WAYPOINT_TOLERANCE = 0.05            # Distance to consider waypoint reached during navigation (m)
+    SEARCH_WAYPOINT_TOLERANCE = 0.05         # Distance to consider waypoint reached during search (m)
+    TARGET_FILTER_ALPHA = 0.1                # Exponential smoothing factor for target position (0-1)
+    
+    # ---- Obstacle Avoidance Parameters ----
+    OBSTACLE_SAFETY_MARGIN = 0.05            # Extra margin around detected obstacles (m)
+    NEAR_OBSTACLE_DISTANCE = 0.5             # Distance to start obstacle repulsion (m)
+    MAX_SPEED_NEAR_OBSTACLE = 0.15           # Speed limit when near obstacles (m/s)
+    AVOIDANCE_GAIN = 0.5                     # Gain for obstacle repulsion force
+    AVOIDANCE_MIN_THRESHOLD = 0.01           # Minimum repulsion force to apply (m/s)
+    AVOIDANCE_VECTOR_THRESHOLD = 0.02        # Threshold to show "avoiding" status in viz (m/s)
+    
+    # ---- Landing Pad Detection Parameters ----
+    LANDING_ZONE_RADIUS = 0.1                # Distance to goal to trigger search mode (m)
+    SEARCH_AREA_SIZE = 0.6                   # Cross pattern search extent from center (m)
+    SEARCH_STEP_SIZE = 0.3                   # Distance between search waypoints (m)
+    PAD_CENTER_TOLERANCE = 0.05              # Distance to consider arrived at pad center (m)
+    SEARCH_TIMEOUT = 60.0                    # Maximum search time before fallback (s)
+    
+    # Detection algorithm parameters
+    DETECTION_LAG = 12                       # Smoothing window size for peak detection
+    DETECTION_THRESHOLD = 1.0                # Z-score threshold for edge detection (1.0-2.5)
+    DETECTION_INFLUENCE = 0.1                # Peak influence on running mean (0.1-0.3)
+    MIN_PEAK_HEIGHT = 0.05                   # Minimum height difference for edge detection (m)
+    
+    # Z-range sensor filtering
+    ZRANGE_MIN_VALID = 0.05                  # Minimum valid z-range reading (m)
+    ZRANGE_MAX_VALID = 1.0                   # Maximum valid z-range reading (m)
+    
+    # ---- Map Parameters ----
+    MAP_WIDTH = 5.0                          # Map width (m)
+    MAP_HEIGHT = 3.0                         # Map height (m)
+    MAP_RESOLUTION = 0.05                    # Grid cell size (m)
+    MAP_CENTER_X = 2.5                       # Map center X coordinate (m)
+    MAP_CENTER_Y = 1.5                       # Map center Y coordinate (m)
+    MAP_BOUNDARY_WIDTH = 2                   # Boundary cells to mark as occupied
+    MAP_OBSTACLE_THRESHOLD = 0.5             # Threshold for considering cell as obstacle
+    MAP_UPDATE_INTERVAL = 3                  # Update map every N steps
+    MAP_MAX_SENSOR_RANGE = 2.0               # Maximum sensor range to use for mapping (m)
+    MAP_MIN_SENSOR_RANGE = 0.05              # Minimum sensor range to use for mapping (m)
+    MAP_OCCUPANCY_VALUE = 1.0                # Value to set for occupied cells
+    
+    # ---- Control Parameters ----
+    YAW_RATE_HOLD = 0.0                      # Yaw rate to maintain current heading (deg/s)
+    HOVER_SETPOINT_DEFAULTS = {              # Default hover setpoint values
+        'x': 0.0, 'y': 0.0, 'yaw': 0.0, 'height': DEFAULT_FLIGHT_HEIGHT
+    }
+    
+    # ---- Timing Parameters ----
+    CONNECTION_TIMEOUT = 10.0                # Timeout for drone connection (s)
+    SENSOR_INIT_DELAY = 0.3                  # Delay after sensor initialization (s)
+    TAKEOFF_HOLD_DURATION = 0.5              # Hold time at start position after takeoff (s)
+    LANDING_HOLD_DURATION = 1.0              # Hold time at pad center before landing (s)
+    LANDING_GRADUAL_DURATION = 2.0           # Duration of gradual landing (s)
+    LANDING_MIN_HEIGHT = 0.2                 # Minimum height during gradual landing (m)
+    DEFAULT_HOLD_DURATION = 1.0              # Default hold position duration (s)
+    DEBUG_PRINT_INTERVAL = 2.0               # Print debug info every N seconds
+    
+    # ---- Visualization Parameters ----
+    VIZ_XLIM = (0, 5)                        # Visualization X-axis limits (m)
+    VIZ_YLIM = (0, 3)                        # Visualization Y-axis limits (m)
+    VIZ_FIGSIZE = (12, 9)                    # Figure size (width, height) in inches
+    VIZ_ANIMATION_SPEED = 0.05               # Animation frame delay (s)
+    
     def __init__(self,
-                 cruise_speed=0.2,     # m/s along path
-                 searching_speed=0.1,  # m/s during landing pad search
-                 flight_height=0.5,
-                 control_rate_hz=50.0):
+                 cruise_speed=None,
+                 searching_speed=None,
+                 flight_height=None,
+                 control_rate_hz=None):
+        """
+        Initialize Crazyflie hover navigation with landing pad detection.
+        
+        Args:
+            cruise_speed: Override default cruise speed (m/s)
+            searching_speed: Override default searching speed (m/s)
+            flight_height: Override default flight height (m)
+            control_rate_hz: Override default control rate (Hz)
+        """
         self.controller = CrazyflieController()
         self.uri = self.controller.config['connection']['uri']
 
-        self.start = (0.7, 1.5)
-        self.goal = (2.8, 1.5)
+        # Mission waypoints
+        self.start = self.START_POSITION
+        self.goal = self.GOAL_POSITION
+        
+        # Current state
         self.current_x = self.start[0]
         self.current_y = self.start[1]
-        self.current_z = 0.1
-        self.current_yaw = 0.0  # radians
-        self.current_z_range = None  # z-range sensor reading
+        self.current_z = self.INITIAL_Z
+        self.current_yaw = self.INITIAL_YAW
+        self.current_z_range = None
 
+        # Flight parameters (use provided or defaults)
+        self.cruise_speed = cruise_speed if cruise_speed is not None else self.DEFAULT_CRUISE_SPEED
+        self.searching_speed = searching_speed if searching_speed is not None else self.DEFAULT_SEARCHING_SPEED
+        self.flight_height = flight_height if flight_height is not None else self.DEFAULT_FLIGHT_HEIGHT
+        self.control_rate_hz = control_rate_hz if control_rate_hz is not None else self.DEFAULT_CONTROL_RATE_HZ
 
-        self.cruise_speed = cruise_speed
-        self.searching_speed = searching_speed
-        self.flight_height = flight_height
-        self.control_rate_hz = control_rate_hz
-        self.safety_margin = 0.05 # This will add extra obstacle margin in meters
-        self.near_obstacle_dist = 0.5 # m to start repulsion from obstacles
-        self.max_speed_near_obstacle = 0.15 # m/s max speed when near obstacles
-
-        # Landing pad detection parameters (TUNABLE)
-        self.landing_zone_radius = 0.1  # Distance to goal to trigger search (m)
-        self.search_area_size = 0.6     # Cross pattern search extent (m)
-        self.search_step_size = 0.3    # Distance to move in each direction (m)
-        self.pad_center_tolerance = 0.05  # How close to get to calculated center (m)
-        self.search_timeout = 60.0      # Max search time (seconds)
-
+        # Initialize grid map
         self.grid_map = GridMap(
-            width=int(5.0 / 0.05), height=int(3.0 / 0.05),
-            resolution=0.05, center_x=2.5, center_y=1.5
+            width=int(self.MAP_WIDTH / self.MAP_RESOLUTION),
+            height=int(self.MAP_HEIGHT / self.MAP_RESOLUTION),
+            resolution=self.MAP_RESOLUTION,
+            center_x=self.MAP_CENTER_X,
+            center_y=self.MAP_CENTER_Y
         )
-        self.grid_map.occupy_boundaries(boundary_width=2)
+        self.grid_map.occupy_boundaries(boundary_width=self.MAP_BOUNDARY_WIDTH)
 
+        # Navigation state
         self.waypoints_x = []
         self.waypoints_y = []
         self.waypoint_idx = 0
 
+        # Sensors
         self.multiranger = None
         self.sensor_readings = {}
 
+        # Visualization
         self.visualizer = None
 
-        # Hover state and timer (names like multiranger_pointcloud.py)
-        self.hover = {'x': 0.0, 'y': 0.0, 'yaw': 0.0, 'height': self.flight_height}
+        # Hover state and timer
+        self.hover = self.HOVER_SETPOINT_DEFAULTS.copy()
+        self.hover['height'] = self.flight_height
         self._hover_lock = threading.Lock()
         self.hover_timer = None
 
+        # Mission control
         self.mission_active = False
-        self.target_filter = PositionFilter(alpha=0.4)
+        self.target_filter = PositionFilter(alpha=self.TARGET_FILTER_ALPHA)
 
         # Landing pad detection
         self.detector = LandingPadDetector()
         self.search_pattern = SearchPattern()
         
-        # Configure detection for 0.3x0.3m pad at 0.1m height
+        # Configure detection algorithm
         self.detector.configure_detection({
-            'lag': 8,
-            'threshold': 1.5,      # TUNABLE: 1.0-2.5
-            'influence': 0.2,      # TUNABLE: 0.1-0.3
-            'min_peak_height': 0.05  # TUNABLE: 0.03-0.08 (pad is 0.1m high)
+            'lag': self.DETECTION_LAG,
+            'threshold': self.DETECTION_THRESHOLD,
+            'influence': self.DETECTION_INFLUENCE,
+            'min_peak_height': self.MIN_PEAK_HEIGHT
         })
 
         # Mission state machine
-        self.mission_state = 'NAVIGATING'  # NAVIGATING, SEARCHING, CENTERING, LANDING
+        self.mission_state = 'NAVIGATING'
         self.search_waypoints = []
         self.search_waypoint_idx = 0
         self.search_start_time = None
@@ -288,7 +431,7 @@ class RealHardwareHoverNav:
     def connect_cf(self):
         cflib.crtp.init_drivers()
         self.controller.connect(self.uri, x=self.start[0], y=self.start[1], z=self.current_z, yaw=self.current_yaw)
-        if not self.controller.wait_for_connection(timeout=10.0):
+        if not self.controller.wait_for_connection(timeout=self.CONNECTION_TIMEOUT):
             raise RuntimeError('Connection failed')
         self.controller.add_data_callback(self.position_callback)
 
@@ -298,7 +441,8 @@ class RealHardwareHoverNav:
 
     def setup_visualizer(self):
         self.visualizer = DroneNavigationVisualizer(
-            xlim=(0, 5), ylim=(0, 3), figsize=(12, 9), animation_speed=0.05
+            xlim=self.VIZ_XLIM, ylim=self.VIZ_YLIM, 
+            figsize=self.VIZ_FIGSIZE, animation_speed=self.VIZ_ANIMATION_SPEED
         )
         self.visualizer.setup(start=self.start, goal=self.goal, grid_map=self.grid_map)
 
@@ -308,7 +452,7 @@ class RealHardwareHoverNav:
             rate_hz=self.control_rate_hz,
             hover_state=self.hover,
             lock=self._hover_lock,
-            max_speed=self.max_speed_near_obstacle  # global safety clamp
+            max_speed=self.MAX_SPEED_NEAR_OBSTACLE
         )
         self.hover_timer.start()
 
@@ -319,7 +463,10 @@ class RealHardwareHoverNav:
     # ---- Planning / Mapping ----
 
     def plan_initial_path(self):
-        ok, self.waypoints_x, self.waypoints_y = plan_path_with_dstar(self.grid_map, self.start, self.goal)
+        ok, self.waypoints_x, self.waypoints_y = plan_path_with_dstar(
+            self.grid_map, self.start, self.goal,
+            obstacle_threshold=self.MAP_OBSTACLE_THRESHOLD
+        )
         if not ok:
             raise RuntimeError('Initial planning failed')
         if self.visualizer:
@@ -345,14 +492,19 @@ class RealHardwareHoverNav:
             self.visualizer.update_sensors(self.sensor_readings)
 
     def update_map_if_needed(self, step):
-        if step % 3 != 0:
+        if step % self.MAP_UPDATE_INTERVAL != 0:
             return 0
-        return update_map(self.grid_map, 
-                          self.sensor_readings, 
-                          self.current_x, 
-                          self.current_y, 
-                          self.current_yaw, 
-                          safety_margin=self.safety_margin)
+        return update_map(
+            self.grid_map, 
+            self.sensor_readings, 
+            self.current_x, 
+            self.current_y, 
+            self.current_yaw, 
+            safety_margin=self.OBSTACLE_SAFETY_MARGIN,
+            max_range=self.MAP_MAX_SENSOR_RANGE,
+            min_range=self.MAP_MIN_SENSOR_RANGE,
+            occupancy_value=self.MAP_OCCUPANCY_VALUE
+        )
 
     def replan_if_blocked(self, cells_updated):
         if cells_updated == 0:
@@ -364,10 +516,13 @@ class RealHardwareHoverNav:
         if ix is None:
             return
         val = self.grid_map.get_value_from_xy_index(ix, iy)
-        if val is not None and val > 0.5:
-            ok, self.waypoints_x, self.waypoints_y = plan_path_with_dstar(self.grid_map, 
-                                                                          (self.current_x, self.current_y), 
-                                                                          self.goal)
+        if val is not None and val > self.MAP_OBSTACLE_THRESHOLD:
+            ok, self.waypoints_x, self.waypoints_y = plan_path_with_dstar(
+                self.grid_map, 
+                (self.current_x, self.current_y), 
+                self.goal,
+                obstacle_threshold=self.MAP_OBSTACLE_THRESHOLD
+            )
             if ok:
                 self.waypoint_idx = 0
                 if self.visualizer:
@@ -384,28 +539,28 @@ class RealHardwareHoverNav:
         
         # Start at center
         waypoints.append((cx, cy, 'center'))
-        num_steps = int(self.search_area_sizQe / self.search_step_size)
+        num_steps = int(self.SEARCH_AREA_SIZE / self.SEARCH_STEP_SIZE)
 
         
         # Forward pass (positive x direction)
         for i in range(1, num_steps + 1):
-            waypoints.append((cx + i * self.search_step_size, cy, 'forward'))
+            waypoints.append((cx + i * self.SEARCH_STEP_SIZE, cy, 'forward'))
 
         # Backward pass (negative x direction)
         for i in range(1, num_steps + 1):
-            waypoints.append((cx - i * self.search_step_size, cy, 'back'))    
+            waypoints.append((cx - i * self.SEARCH_STEP_SIZE, cy, 'back'))    
 
         # Back to center
         waypoints.append((cx, cy, 'center'))
 
         # Left pass (positive y direction)
         for i in range(1, num_steps + 1):
-            waypoints.append((cx, cy + i * self.search_step_size, 'left'))
+            waypoints.append((cx, cy + i * self.SEARCH_STEP_SIZE, 'left'))
         
         
         # Right pass (negative y direction)
         for i in range(1, num_steps + 1):
-            waypoints.append((cx, cy - i * self.search_step_size, 'right'))
+            waypoints.append((cx, cy - i * self.SEARCH_STEP_SIZE, 'right'))
         
         # Back to center
         waypoints.append((cx, cy, 'center'))
@@ -433,11 +588,12 @@ class RealHardwareHoverNav:
         if self.mission_state != 'SEARCHING':
             return
         
-        if self.current_z_range is None or self.current_z_range < 0.05 or self.current_z_range > 1.0:
+        if (self.current_z_range is None or 
+            self.current_z_range < self.ZRANGE_MIN_VALID or 
+            self.current_z_range > self.ZRANGE_MAX_VALID):
             return
         
-        # Calculate height (flight_height - z_range gives height above surface)
-        surface_height = self.flight_height - self.current_z_range
+
         
         # Get current search direction
         if self.search_waypoint_idx < len(self.search_waypoints):
@@ -445,7 +601,7 @@ class RealHardwareHoverNav:
             self.detector.set_flight_direction(direction)
         
         # Process measurement
-        self.detector.process_height_measurement(surface_height, (self.current_x, self.current_y))
+        self.detector.process_height_measurement(self.current_z, (self.current_x, self.current_y))
         
         # Update detected edges list for visualization
         self.detected_edges = [p['position'] for p in self.detector.peak_positions]
@@ -456,7 +612,7 @@ class RealHardwareHoverNav:
             return False
         
         # Check timeout
-        if time.time() - self.search_start_time > self.search_timeout:
+        if time.time() - self.search_start_time > self.SEARCH_TIMEOUT:
             print("Search timeout reached")
             return self.finalize_search()
         
@@ -496,7 +652,7 @@ class RealHardwareHoverNav:
             # Normal path following
             if self.waypoint_idx < len(self.waypoints_x):
                 tx, ty = self.waypoints_x[self.waypoint_idx], self.waypoints_y[self.waypoint_idx]
-                if np.hypot(tx - self.current_x, ty - self.current_y) < 0.12:
+                if np.hypot(tx - self.current_x, ty - self.current_y) < self.NAV_WAYPOINT_TOLERANCE:
                     self.waypoint_idx += 1
 
             if self.waypoint_idx < len(self.waypoints_x):
@@ -510,7 +666,7 @@ class RealHardwareHoverNav:
             # Follow search pattern
             if self.search_waypoint_idx < len(self.search_waypoints):
                 tx, ty, _ = self.search_waypoints[self.search_waypoint_idx]
-                if np.hypot(tx - self.current_x, ty - self.current_y) < 0.08:
+                if np.hypot(tx - self.current_x, ty - self.current_y) < self.SEARCH_WAYPOINT_TOLERANCE:
                     self.search_waypoint_idx += 1
                 target = (tx, ty)
             else:
@@ -538,20 +694,24 @@ class RealHardwareHoverNav:
         # World-frame velocities
         vx_path_w, vy_path_w = compute_path_velocity((self.current_x, self.current_y), (ftx, fty), current_speed)
 
-        vx_avoid_w, vy_avoid_w = compute_avoidance_velocity(self.sensor_readings, 
-                                                            self.current_yaw, 
-                                                            danger_dist=self.near_obstacle_dist, 
-                                                            gain=0.5)
+        vx_avoid_w, vy_avoid_w = compute_avoidance_velocity(
+            self.sensor_readings, 
+            self.current_yaw, 
+            danger_dist=self.NEAR_OBSTACLE_DISTANCE, 
+            gain=self.AVOIDANCE_GAIN,
+            min_threshold=self.AVOIDANCE_MIN_THRESHOLD
+        )
         vx_w = vx_path_w + vx_avoid_w
         vy_w = vy_path_w + vy_avoid_w
 
         # Limit velocity near obstacles
-        dists = [d for d in [self.sensor_readings.get('front'), self.sensor_readings.get('back'), self.sensor_readings.get('left'), self.sensor_readings.get('right')] if d is not None]
+        dists = [d for d in [self.sensor_readings.get('front'), self.sensor_readings.get('back'), 
+                             self.sensor_readings.get('left'), self.sensor_readings.get('right')] if d is not None]
         min_dist = min(dists) if dists else None
-        if min_dist is not None and min_dist < self.near_obstacle_dist:
+        if min_dist is not None and min_dist < self.NEAR_OBSTACLE_DISTANCE:
             speed = np.hypot(vx_w, vy_w)
-            if speed > 1e-6 and speed > self.max_speed_near_obstacle:
-                scale = self.max_speed_near_obstacle / speed
+            if speed > 1e-6 and speed > self.MAX_SPEED_NEAR_OBSTACLE:
+                scale = self.MAX_SPEED_NEAR_OBSTACLE / speed
                 vx_w *= scale
                 vy_w *= scale
 
@@ -559,47 +719,55 @@ class RealHardwareHoverNav:
         vx_b, vy_b = world_to_body(vx_w, vy_w, self.current_yaw)
         self.updateHover('x', vx_b)
         self.updateHover('y', vy_b)
-        self.updateHover('yaw', 0.0)
+        self.updateHover('yaw', self.YAW_RATE_HOLD)
         self.updateHover('height', self.flight_height)
 
         # Visualizer updates (repulsion shown using avoidance vector)
         if self.visualizer:
             self.visualizer.update_repulsion(vx_avoid_w, vy_avoid_w)
-            self.visualizer.set_status(stuck=False, emergency=False, avoiding=(np.hypot(vx_avoid_w, vy_avoid_w) > 0.02))
+            self.visualizer.set_status(
+                stuck=False, 
+                emergency=False, 
+                avoiding=(np.hypot(vx_avoid_w, vy_avoid_w) > self.AVOIDANCE_VECTOR_THRESHOLD)
+            )
             
             # Show detected edges and calculated center
             self.visualizer.update_detected_edges(self.detected_edges, self.calculated_pad_center)
             
             self.visualizer.render()
 
-    def hold_position(self, duration_s=1.0):
+    def hold_position(self, duration_s=None):
+        if duration_s is None:
+            duration_s = self.DEFAULT_HOLD_DURATION
         dt = 1.0 / self.control_rate_hz
         steps = max(1, int(duration_s * self.control_rate_hz))
         for _ in range(steps):
-            self.updateHover('x', 0.0)
-            self.updateHover('y', 0.0)
-            self.updateHover('yaw', 0.0)
+            self.updateHover('x', self.HOVER_SETPOINT_DEFAULTS['x'])
+            self.updateHover('y', self.HOVER_SETPOINT_DEFAULTS['y'])
+            self.updateHover('yaw', self.YAW_RATE_HOLD)
             self.updateHover('height', self.flight_height)
             time.sleep(dt)
 
 
     def takeoff(self):
-        self.updateHover('x', 0.0)
-        self.updateHover('y', 0.0)
-        self.updateHover('yaw', 0.0)
+        self.updateHover('x', self.HOVER_SETPOINT_DEFAULTS['x'])
+        self.updateHover('y', self.HOVER_SETPOINT_DEFAULTS['y'])
+        self.updateHover('yaw', self.YAW_RATE_HOLD)
         self.updateHover('height', self.flight_height)
 
 
-    def gradual_land(self, duration_s=3.0):
+    def gradual_land(self, duration_s=None):
+        if duration_s is None:
+            duration_s = self.LANDING_GRADUAL_DURATION
         dt = 1.0 / self.control_rate_hz
         steps = max(1, int(duration_s * self.control_rate_hz))
         with self._hover_lock:
             start_z = float(self.hover.get('height', self.flight_height))
         for i in range(steps):
-            z = max(0.2, start_z * (1.0 - (i + 1) / steps))
-            self.updateHover('x', 0.0)
-            self.updateHover('y', 0.0)
-            self.updateHover('yaw', 0.0)
+            z = max(self.LANDING_MIN_HEIGHT, start_z * (1.0 - (i + 1) / steps))
+            self.updateHover('x', self.HOVER_SETPOINT_DEFAULTS['x'])
+            self.updateHover('y', self.HOVER_SETPOINT_DEFAULTS['y'])
+            self.updateHover('yaw', self.YAW_RATE_HOLD)
             self.updateHover('height', z)
             time.sleep(dt)
 
@@ -612,7 +780,7 @@ class RealHardwareHoverNav:
 
         try:
             self.setup_sensors()
-            time.sleep(0.3)
+            time.sleep(self.SENSOR_INIT_DELAY)
             if show_visualizer:
                 self.setup_visualizer()
 
@@ -622,9 +790,11 @@ class RealHardwareHoverNav:
             # Set initial hover commands (height set elsewhere as absolute)
             self.takeoff()
 
-            # Hold after takeoff before moving
-            # self.hold_position(duration_s=1.0)
-            self.send_position_setpoint(self.start[0], self.start[1], self.flight_height, 0.0, duration_s=0.5)
+            # Hold at start position after takeoff
+            self.send_position_setpoint(
+                self.start[0], self.start[1], self.flight_height, 
+                self.INITIAL_YAW, duration_s=self.TAKEOFF_HOLD_DURATION
+            )
 
             # Initial planning
             self.plan_initial_path()
@@ -641,7 +811,7 @@ class RealHardwareHoverNav:
                 # STATE TRANSITIONS
                 if self.mission_state == 'NAVIGATING':
                     # Check if entered landing zone
-                    if dist_to_goal < self.landing_zone_radius:
+                    if dist_to_goal < self.LANDING_ZONE_RADIUS:
                         print(f"\n=== Entering landing zone (dist={dist_to_goal:.3f}m) ===")
                         self.start_search_mode()
                 
@@ -658,14 +828,18 @@ class RealHardwareHoverNav:
                     if self.calculated_pad_center:
                         dist_to_center = np.hypot(self.calculated_pad_center[0] - self.current_x,
                                                    self.calculated_pad_center[1] - self.current_y)
-                        if dist_to_center < self.pad_center_tolerance:
+                        if dist_to_center < self.PAD_CENTER_TOLERANCE:
                             print(f"=== Reached pad center, initiating landing ===")
                             self.mission_state = 'LANDING'
                             # Precision positioning before landing
-                            self.send_position_setpoint(self.calculated_pad_center[0], 
-                                                       self.calculated_pad_center[1], 
-                                                       self.flight_height, 0.0, duration_s=1.0)
-                            self.gradual_land(duration_s=2.0)
+                            self.send_position_setpoint(
+                                self.calculated_pad_center[0], 
+                                self.calculated_pad_center[1], 
+                                self.flight_height, 
+                                self.INITIAL_YAW, 
+                                duration_s=self.LANDING_HOLD_DURATION
+                            )
+                            self.gradual_land()
                             print('Landed successfully on pad')
                             break
                 
@@ -680,11 +854,11 @@ class RealHardwareHoverNav:
                 # Compute and update hover velocities
                 self.compute_and_update_hover()
 
-                # Debug output every 2 seconds
-                if step % (self.control_rate_hz * 2) == 0:
+                # Debug output at regular intervals
+                if step % int(self.control_rate_hz * self.DEBUG_PRINT_INTERVAL) == 0:
+                    z_range_str = f"{self.current_z:.3f}m" if self.current_z else "N/A"
                     print(f"[{self.mission_state}] Pos: ({self.current_x:.2f}, {self.current_y:.2f}), "
-                          f"Dist to goal: {dist_to_goal:.2f}m, "
-                          f"Z-range: {self.current_z_range:.3f}m" if self.current_z_range else "Z-range: N/A")
+                          f"Dist to goal: {dist_to_goal:.2f}m, Z-range: {z_range_str}")
                     if self.mission_state == 'SEARCHING':
                         print(f"  Search progress: {self.search_waypoint_idx}/{len(self.search_waypoints)}, "
                               f"Edges detected: {len(self.detected_edges)}")
@@ -715,12 +889,11 @@ class RealHardwareHoverNav:
 
 
 def main():
-    demo = RealHardwareHoverNav(
-        cruise_speed=0.3,
-        searching_speed=0.1,
-        flight_height=0.5,
-        control_rate_hz=50.0
-    )
+    """
+    Main entry point for real hardware hover navigation with landing pad detection.
+    Uses default class constants - modify RealHardwareHoverNav class constants to tune parameters.
+    """
+    demo = RealHardwareHoverNav()
     demo.run(show_visualizer=True)
 
 

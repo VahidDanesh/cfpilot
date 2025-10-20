@@ -55,13 +55,13 @@ class LandingPadDetector:
         self.logger.info(f"Detection configured: lag={self.lag}, threshold={self.threshold}, "
                         f"influence={self.influence}, min_height={self.min_peak_height}")
     
-    def start_detection(self) -> None:
+    def start_detection(self, baseline_height: float=0.5) -> None:
         """Start the landing pad detection process"""
         self.detection_active = True
         self.height_data.clear()
         self.position_data.clear()
         self.peak_positions.clear()
-        self.baseline_height = None
+        self.baseline_height = baseline_height
         self.calculated_center = None
         self.center_confidence = 0.0
         
@@ -128,6 +128,7 @@ class LandingPadDetector:
         
         # Check for significant peak (platform edge)
         if z_score > self.threshold:
+            self.logger.info(f"Z-score: {z_score:.2f}, current_height: {current_height:.3f}, current_mean: {current_mean:.3f}, current_std: {current_std:.3f}, baseline_height: {self.baseline_height:.3f}")
             height_diff = abs(current_height - self.baseline_height) if self.baseline_height else 0
             
             # Verify it's a significant height change
