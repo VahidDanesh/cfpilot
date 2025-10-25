@@ -192,7 +192,7 @@ class NoOpContext:
 
 class RealHardwareHoverNav:
     # Constants
-    WAYPOINT_ACCEPTANCE_RADIUS = 0.15  # m
+    WAYPOINT_ACCEPTANCE_RADIUS = 0.10  # m
     TARGET_ARRIVAL_THRESHOLD = 0.02    # m
     MIN_HEIGHT = 0.2                   # m - minimum safe height
     MAP_UPDATE_INTERVAL = 5           # steps between map updates
@@ -204,8 +204,8 @@ class RealHardwareHoverNav:
         self.controller = CrazyflieController()
         self.uri = self.controller.config['connection']['uri']
 
-        self.start = (0.7, 1.5)
-        self.goal = (2.7, 1.5)
+        self.start = (0.6, 1.25)
+        self.goal = (5.45, 0.75)
         self.current_x = self.start[0]
         self.current_y = self.start[1]
         self.current_z = 0.1
@@ -223,8 +223,8 @@ class RealHardwareHoverNav:
         self.max_speed_near_obstacle = 0.15    # m/s - max speed near obstacles
 
         self.grid_map = GridMap(
-            width=int(5.0 / 0.05), height=int(3.0 / 0.05),
-            resolution=0.05, center_x=2.5, center_y=1.5
+            width=int(5.8 / 0.05), height=int(2.7 / 0.05),
+            resolution=0.05, center_x=2.9, center_y=1.35
         )
         self.grid_map.occupy_boundaries(boundary_width=2)
 

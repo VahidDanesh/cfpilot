@@ -123,8 +123,8 @@ def update_map(grid_map, sensors, x, y, yaw, safety_margin=0.15, drone_clearance
     """
     # First, ensure drone's current position and immediate area is marked as free
     # This prevents the drone from marking itself as an obstacle
-    for dx in np.linspace(-drone_clearance, drone_clearance, 2):
-        for dy in np.linspace(-drone_clearance, drone_clearance, 2):
+    for dx in np.linspace(-drone_clearance, drone_clearance, 4):
+        for dy in np.linspace(-drone_clearance, drone_clearance, 4):
             if np.hypot(dx, dy) <= drone_clearance:  # Circular clearance
                 grid_map.set_value_from_xy_pos(x + dx, y + dy, 0.0)
     
@@ -226,7 +226,7 @@ class NoOpContext:
 class RealHardwareHoverNav:
     # Constants
     WAYPOINT_ACCEPTANCE_RADIUS = 0.05  # m
-    TARGET_ARRIVAL_THRESHOLD = 0.1    # m - threshold to start holding position at goal/start
+    TARGET_ARRIVAL_THRESHOLD = 0.5    # m - threshold to start holding position at goal/start
     MIN_HEIGHT = 0.2                   # m - minimum safe height
     MAP_UPDATE_INTERVAL = 2            # steps between map updates (~10 Hz at 50 Hz loop)
     
@@ -237,8 +237,8 @@ class RealHardwareHoverNav:
         self.controller = CrazyflieController()
         self.uri = self.controller.config['connection']['uri']
 
-        self.start = (0.6, 1.25)
-        self.goal = (5.4, 0.65)
+        self.start = (0.6, 1.3)
+        self.goal = (4.5, 2.0)
         self.current_x = self.start[0]
         self.current_y = self.start[1]
         self.current_z = 0.1
@@ -253,13 +253,13 @@ class RealHardwareHoverNav:
         self.cruise_speed = cruise_speed
         self.flight_height = flight_height
         self.control_rate_hz = control_rate_hz
-        self.safety_margin = 0.1              # m - extra obstacle margin
+        self.safety_margin = 0.05              # m - extra obstacle margin
         self.near_obstacle_dist = 0.4          # m - start repulsion distance
         self.max_speed_near_obstacle = 0.2    # m/s - max speed near obstacles
 
         self.grid_map = GridMap(
-            width=int(5.8 / 0.05), height=int(2.7 / 0.05),
-            resolution=0.05, center_x=2.4, center_y=1.35
+            width=int(5.4 / 0.05), height=int(2.6 / 0.05),
+            resolution=0.05, center_x=2.7, center_y=1.3
         )
         self.grid_map.occupy_boundaries(boundary_width=2)
 
@@ -397,7 +397,7 @@ class RealHardwareHoverNav:
 
     def setup_visualizer(self):
         self.visualizer = DroneNavigationVisualizer(
-            xlim=(0, 5), ylim=(0, 3), figsize=(12, 9), animation_speed=0.05
+            xlim=(0, 6), ylim=(0, 3), figsize=(12, 9), animation_speed=0.05
         )
         self.visualizer.setup(start=self.start, goal=self.goal, grid_map=self.grid_map)
         
@@ -426,7 +426,7 @@ class RealHardwareHoverNav:
     def start_hover_timer(self):
         self.hover_timer = HoverTimer(
             self.controller.cf,
-            rate_hz=50.0,  # Fixed rate for smooth hover commands
+            rate_hz=self.control_rate_hz,  # Fixed rate for smooth hover commands
             hover_state=self.hover,
             lock=self._hover_lock,
             max_speed=self.max_speed_near_obstacle  # global safety clamp
@@ -534,7 +534,7 @@ class RealHardwareHoverNav:
             self.current_y, 
             self.current_yaw, 
             safety_margin=self.safety_margin,
-            drone_clearance=0.05  # Circular clearance around drone
+            drone_clearance=0.03  # Circular clearance around drone
         )
         
         if cells_updated > 0:
@@ -600,11 +600,11 @@ class RealHardwareHoverNav:
             # Update hover commands
             self.update_hover(vx=vx_b, vy=vy_b, yaw=0.0, height=height_cmd)
             
-            # Update visualizer
+            # Update visualizer - map still updates in background
             if self.visualizer:
                 self.visualizer.update_repulsion(0.0, 0.0)
                 self.visualizer.set_status(stuck=False, emergency=False, avoiding=False)
-                self._update_position_display("HOLDING")
+                self._update_position_display("MANUAL CONTROL")
                 self.visualizer.render()
             return
         
@@ -756,10 +756,50 @@ class RealHardwareHoverNav:
             self.mission_phase = 'AT_START_LANDED'
             print('Landed at start. Press ESC to exit program.')
     
+    def clear_area_around_position(self, x, y, radius=0.3):
+        """
+        Clear obstacles in a circular area around a position.
+        
+        This is useful to clear the goal/start area before planning a return path,
+        preventing false obstacles from blocking the planner.
+        
+        Args:
+            x, y: Position in world coordinates (m)
+            radius: Radius of the circular area to clear (m)
+        """
+        # Number of points to sample in the circular area
+        num_samples = int((radius / self.grid_map.resolution) ** 2 * 3.14 * 2)  # Approximate
+        num_samples = max(20, min(num_samples, 200))  # Limit between 20 and 200
+        
+        cells_cleared = 0
+        
+        # Clear in a grid pattern within the radius
+        steps = int(radius / self.grid_map.resolution) + 1
+        for dx in np.linspace(-radius, radius, steps * 2):
+            for dy in np.linspace(-radius, radius, steps * 2):
+                if np.hypot(dx, dy) <= radius:  # Check if inside circle
+                    clear_x = x + dx
+                    clear_y = y + dy
+                    ok = self.grid_map.set_value_from_xy_pos(clear_x, clear_y, 0.0)
+                    if ok:
+                        cells_cleared += 1
+        
+        if cells_cleared > 0:
+            print(f"Cleared {cells_cleared} cells in {radius}m radius around ({x:.2f}, {y:.2f})")
+        
+        return cells_cleared
+    
     def handle_takeoff_command(self):
         """Process takeoff command from keyboard."""
         if self.mission_phase == 'AT_GOAL_LANDED':
             print('\n=== Taking off from goal, returning to start ===')
+            
+            # Clear obstacles around current position (goal) and destination (start)
+            # This prevents false obstacles from blocking the return path
+            print('Clearing obstacles around goal and start positions...')
+            self.clear_area_around_position(self.current_x, self.current_y, radius=0.5)
+            self.clear_area_around_position(self.goal[0], self.goal[1], radius=0.5)
+            self.clear_area_around_position(self.start[0], self.start[1], radius=0.5)
             
             # Restart hover timer before takeoff
             self._reset_hover_state()
@@ -835,15 +875,21 @@ class RealHardwareHoverNav:
                 if dist_to_target < self.TARGET_ARRIVAL_THRESHOLD:
                     if self.mission_phase == 'GOING_TO_GOAL':
                         print('\n=== Arrived at goal - Holding position ===')
+                        print('Use arrow keys to position above landing pad')
+                        print('Use Q/A to adjust height')
                         print('Press L to land, then T to takeoff and return')
                         self.mission_phase = 'AT_GOAL_HOLDING'
                         self.holding_position = True
+                        # Optionally clear area around goal now (helps with return planning later)
+                        # self.clear_area_around_position(self.current_x, self.current_y, radius=0.25)
                     elif self.mission_phase == 'RETURNING_TO_START':
                         print('\n=== Arrived at start - Holding position ===')
+                        print('Use arrow keys to position above landing pad')
+                        print('Use Q/A to adjust height')
                         print('Press L to land, then ESC to exit')
                         self.mission_phase = 'AT_START_HOLDING'
                         self.holding_position = True
-                elif dist_to_target > self.TARGET_ARRIVAL_THRESHOLD * 5:
+                elif dist_to_target > self.TARGET_ARRIVAL_THRESHOLD * 10:
                     self.holding_position = False
 
                 # Wait in landed states (keep visualizer alive)
@@ -854,12 +900,15 @@ class RealHardwareHoverNav:
                     time.sleep(0.05)  # Small sleep to keep GUI responsive
                     continue
 
-                # Sensors
+                # Sensors - always update to keep map responsive
                 self.update_sensors()
 
-                # Map + optional simple replan (only when not holding)
+                # Map updates - always run to keep map current
+                # This allows manual positioning using keyboard at goal/start
+                cells_updated = self.update_map_if_needed(step)
+                
+                # Replanning - only when autonomously navigating (not holding)
                 if not self.holding_position:
-                    cells_updated = self.update_map_if_needed(step)
                     self.replan_if_blocked(cells_updated)
 
                 # Compute and update hover velocities
@@ -867,7 +916,7 @@ class RealHardwareHoverNav:
 
                 step += 1
                 # Small sleep for CPU
-                time.sleep(0.02)
+                time.sleep(0.05)
 
         except KeyboardInterrupt:
             print('Interrupted by user')
@@ -895,7 +944,7 @@ class RealHardwareHoverNav:
 
 def main():
     demo = RealHardwareHoverNav(
-        cruise_speed=0.4,  # Reduced from 0.5 for smoother, more stable flight
+        cruise_speed=0.3,  # Reduced from 0.5 for smoother, more stable flight
         flight_height=0.5,
         control_rate_hz=20.0
     )
