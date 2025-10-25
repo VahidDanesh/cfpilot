@@ -142,7 +142,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def updateHover(self, k, v):
         if k == 'takeoff':
             # set to default takeoff height (m)
-            self.hover['height'] = 0.3
+            self.hover['height'] = 0.5
             # If we previously sent a stop setpoint, send an immediate hover to restart motors
             if getattr(self, 'stopped', False):
                 try:

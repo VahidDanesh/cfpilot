@@ -43,7 +43,7 @@ class AutonomousMission:
         self.uri = self.controller.config['connection']['uri']
         
         self.start = (0.6, 1.3)
-        self.goal = (5.0, 2.0)
+        self.goal = (5.0, 1.5)
         self.current_x, self.current_y, self.current_z = self.start[0], self.start[1], 0.1
         self.current_yaw = 0.0
         
@@ -54,6 +54,7 @@ class AutonomousMission:
         # Map and planning (increased size to cover full workspace)
         self.grid_map = GridMap(width=int(6.0/0.05), height=int(3.0/0.05),
                                resolution=0.05, center_x=3.0, center_y=1.5)
+                               
         self.grid_map.occupy_boundaries(boundary_width=5)
         self.planner = None
         self.waypoints_x, self.waypoints_y = np.array([]), np.array([])
@@ -319,7 +320,7 @@ class AutonomousMission:
             (self.current_x, self.current_y), (ftx, fty), cruise_speed
         )
         vx_avoid_w, vy_avoid_w = compute_avoidance_velocity(
-            self.sensor_readings, self.current_yaw, danger_dist=0.4, gain=0.5
+            self.sensor_readings, self.current_yaw, danger_dist=0.5, gain=0.7
         )
         
         vx_w, vy_w = vx_path_w + vx_avoid_w, vy_path_w + vy_avoid_w

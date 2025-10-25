@@ -234,8 +234,12 @@ class DStarLite:
         return 1
 
     def calculate_key(self, s: Node):
-        g_val = float(self.g[int(s.x)][int(s.y)])
-        rhs_val = float(self.rhs[int(s.x)][int(s.y)])
+        if s.x is None or s.y is None:
+            raise ValueError(f"Node has None coordinates: x={s.x}, y={s.y}")
+        x_idx = int(s.x)
+        y_idx = int(s.y)
+        g_val = float(self.g[x_idx][y_idx])
+        rhs_val = float(self.rhs[x_idx][y_idx])
         return (min(g_val, rhs_val) + self.h(s) + self.km, min(g_val, rhs_val))
 
     def is_valid(self, node: Node):
