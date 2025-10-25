@@ -182,6 +182,35 @@ def generate_sweep_pattern(center, width, height, spacing=0.3):
     return waypoints
 
 
+def generate_spiral_pattern(center, max_radius=0.5, spacing=0.15, points_per_loop=8):
+    """
+    Generate outward spiral pattern for efficient landing pad search.
+    More efficient than sweep - covers area systematically from center.
+    
+    Args:
+        center: (x, y) center of search area
+        max_radius: Maximum search radius (m)
+        spacing: Radial spacing between loops (m)
+        points_per_loop: Number of waypoints per spiral loop
+        
+    Returns:
+        List of (x, y) waypoints
+    """
+    cx, cy = center
+    waypoints = [(cx, cy)]  # Start at center
+    
+    radius = spacing
+    while radius <= max_radius:
+        for i in range(points_per_loop):
+            angle = 2 * np.pi * i / points_per_loop
+            x = cx + radius * np.cos(angle)
+            y = cy + radius * np.sin(angle)
+            waypoints.append((x, y))
+        radius += spacing
+    
+    return waypoints
+
+
 def interpolate_position(start_pos, end_pos, s):
     """
     Interpolate position between start and end using parameter s.
