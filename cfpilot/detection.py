@@ -47,13 +47,15 @@ class LandingPadDetector:
         self.threshold = params.get('threshold', 1.5)
         self.influence = params.get('influence', 0.2)
         self.min_peak_height = params.get('min_peak_height', 0.03)
+        self.min_edge_distance = params.get('min_edge_distance', 0.1)
         
         # Reset running statistics
         self.running_mean = deque(maxlen=self.lag)
         self.running_std = deque(maxlen=self.lag)
         
         self.logger.info(f"Detection configured: lag={self.lag}, threshold={self.threshold}, "
-                        f"influence={self.influence}, min_height={self.min_peak_height}")
+                        f"influence={self.influence}, min_height={self.min_peak_height}, "
+                        f"min_distance={self.min_edge_distance}")
     
     def start_detection(self, baseline_height: float=0.5) -> None:
         """Start the landing pad detection process"""
@@ -133,17 +135,29 @@ class LandingPadDetector:
             
             # Verify it's a significant height change
             if height_diff > self.min_peak_height:
-                # This looks like a platform edge
-                self.peak_positions.append({
-                    'position': position,
-                    'height': current_height,
-                    'height_diff': height_diff,
-                    'direction': self.flight_direction,
-                    'z_score': z_score
-                })
+                # Check if this edge is too close to existing edges
+                is_too_close = False
+                for existing_edge in self.peak_positions:
+                    ex, ey = existing_edge['position']
+                    dist = math.sqrt((position[0] - ex)**2 + (position[1] - ey)**2)
+                    if dist < self.min_edge_distance:
+                        is_too_close = True
+                        break
                 
-                self.logger.info(f"Platform edge detected at ({position[0]:.3f}, {position[1]:.3f}) "
-                               f"height_diff={height_diff:.3f}m, z_score={z_score:.2f}")
+                if not is_too_close:
+                    # This looks like a platform edge and is far enough from others
+                    self.peak_positions.append({
+                        'position': position,
+                        'height': current_height,
+                        'height_diff': height_diff,
+                        'direction': self.flight_direction,
+                        'z_score': z_score
+                    })
+                    
+                    self.logger.info(f"Platform edge detected at ({position[0]:.3f}, {position[1]:.3f}) "
+                                   f"height_diff={height_diff:.3f}m, z_score={z_score:.2f}")
+                else:
+                    self.logger.debug(f"Edge at ({position[0]:.3f}, {position[1]:.3f}) rejected - too close to existing edge")
                 
                 # Update running statistics with reduced influence
                 influenced_value = self.influence * current_height + (1 - self.influence) * current_mean
@@ -166,7 +180,7 @@ class LandingPadDetector:
         Returns:
             (x, y) center coordinates or None if insufficient data
         """
-        if len(self.peak_positions) < 4:
+        if len(self.peak_positions) < 2:
             self.logger.warning(f"Insufficient border points for center calculation: {len(self.peak_positions)}")
             return None
         
@@ -199,14 +213,15 @@ class LandingPadDetector:
     
     def is_ready_for_landing(self) -> bool:
         """Check if we have sufficient data for confident landing"""
-        if len(self.peak_positions) < 6:
+        if len(self.peak_positions) < 2:
             return False
         
         if self.calculated_center is None:
             return False
         
-        # Check confidence threshold
-        return self.center_confidence > 0.6
+        # Check confidence threshold (lower threshold for 2 edges)
+        min_confidence = 0.3 if len(self.peak_positions) < 4 else 0.6
+        return self.center_confidence > min_confidence
     
     def get_detection_statistics(self) -> Dict[str, Any]:
         """Get detection statistics for debugging"""
