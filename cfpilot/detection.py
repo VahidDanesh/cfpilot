@@ -57,8 +57,12 @@ class LandingPadDetector:
                         f"influence={self.influence}, min_height={self.min_peak_height}, "
                         f"min_distance={self.min_edge_distance}")
     
-    def start_detection(self, baseline_height: float=0.5) -> None:
-        """Start the landing pad detection process"""
+    def start_detection(self, baseline_height: float = None) -> None:
+        """Start the landing pad detection process.
+        
+        Args:
+            baseline_height: Expected flight height (meters). If None, will be auto-detected.
+        """
         self.detection_active = True
         self.height_data.clear()
         self.position_data.clear()
@@ -67,7 +71,10 @@ class LandingPadDetector:
         self.calculated_center = None
         self.center_confidence = 0.0
         
-        self.logger.info("Landing pad detection started")
+        if baseline_height is not None:
+            self.logger.info(f"Detection started with baseline: {baseline_height:.3f}m")
+        else:
+            self.logger.info("Detection started (baseline will be auto-detected)")
     
     def stop_detection(self) -> None:
         """Stop the detection process"""
@@ -93,10 +100,10 @@ class LandingPadDetector:
         self.height_data.append(height)
         self.position_data.append(position)
         
-        # Initialize baseline if not set
+        # Don't override baseline if already set in start_detection()
         if self.baseline_height is None and len(self.height_data) >= 5:
-            self.baseline_height = np.median(list(self.height_data)[-5:])
-            self.logger.info(f"Baseline height established: {self.baseline_height:.3f}m")
+            self.baseline_height = np.median((self.height_data)[-5:])
+            self.logger.info(f"Baseline height auto-established: {self.baseline_height:.3f}m")
         
         # Need sufficient data for peak detection
         if len(self.height_data) < self.lag + 1:

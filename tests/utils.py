@@ -262,16 +262,31 @@ def search_and_detect_pad(detector, current_pos_func, sweep_waypoints,
     return None
 
 
-def land_on_pad(cf_commander, current_pos, pad_center, height, control_rate_hz):
-    """Navigate to pad center and land."""
+def land_on_pad(cf_commander, current_pos, pad_center, height, control_rate_hz, pad_height=0.0):
+    """
+    Navigate to pad center and land.
+    
+    Args:
+        pad_height: Height of landing pad above ground (default 0.0m)
+    """
     print(f'🎯 Navigating to pad center ({pad_center[0]:.3f}, {pad_center[1]:.3f})')
     
+    # Navigate to center at flight height
     navigate_smooth(cf_commander, current_pos, pad_center, height,
                    duration_s=3.0, control_rate_hz=control_rate_hz)
     
-    print('⏸️  Holding above center for 2 seconds...')
-    for _ in range(int(2.0 * control_rate_hz)):
-        cf_commander.send_position_setpoint(pad_center[0], pad_center[1], height, 0)
+    # Descend to just above pad surface
+    landing_height = pad_height + 0.05  # 5cm above pad surface
+    print(f'⏸️  Descending to pad height ({landing_height:.3f}m)...')
+    steps = int(1.0 * control_rate_hz)
+    for i in range(steps):
+        h = height - (height - landing_height) * (i + 1) / steps
+        cf_commander.send_position_setpoint(pad_center[0], pad_center[1], h, 0)
+        time.sleep(1.0 / control_rate_hz)
+    
+    print('⏸️  Holding above pad for 1 second...')
+    for _ in range(int(1.0 * control_rate_hz)):
+        cf_commander.send_position_setpoint(pad_center[0], pad_center[1], landing_height, 0)
         time.sleep(1.0 / control_rate_hz)
 
 

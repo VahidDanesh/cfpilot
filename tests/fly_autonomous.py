@@ -43,7 +43,7 @@ class AutonomousMission:
         self.uri = self.controller.config['connection']['uri']
         
         self.start = (0.6, 1.3)
-        self.goal = (4.5, 2.0)
+        self.goal = (5.0, 2.0)
         self.current_x, self.current_y, self.current_z = self.start[0], self.start[1], 0.1
         self.current_yaw = 0.0
         
@@ -51,10 +51,10 @@ class AutonomousMission:
         self.flight_height = flight_height
         self.control_rate_hz = control_rate_hz
         
-        # Map and planning
-        self.grid_map = GridMap(width=int(5.4/0.05), height=int(2.6/0.05),
-                               resolution=0.05, center_x=2.7, center_y=1.3)
-        self.grid_map.occupy_boundaries(boundary_width=2)
+        # Map and planning (increased size to cover full workspace)
+        self.grid_map = GridMap(width=int(6.0/0.05), height=int(3.0/0.05),
+                               resolution=0.05, center_x=3.0, center_y=1.5)
+        self.grid_map.occupy_boundaries(boundary_width=5)
         self.planner = None
         self.waypoints_x, self.waypoints_y = np.array([]), np.array([])
         self.waypoint_idx = 0
@@ -65,7 +65,7 @@ class AutonomousMission:
         self.detector = LandingPadDetector()
         self.detector.configure_detection({
             'lag': 5, 'threshold': 2, 'influence': 0.6,
-            'min_peak_height': 0.04, 'min_edge_distance': 0.03
+            'min_peak_height': 0.05, 'min_edge_distance': 0.03
         })
         
         # Hover control
@@ -75,7 +75,7 @@ class AutonomousMission:
         
         # Filters
         self.target_filter = ExponentialFilter(alpha=0.6)
-        self.velocity_filter = ExponentialFilter(alpha=0.7, initial_x=0.0, initial_y=0.0)
+        self.velocity_filter = ExponentialFilter(alpha=0.6, initial_x=0.0, initial_y=0.0)
         
         # Visualizer
         self.visualizer = None
@@ -86,10 +86,10 @@ class AutonomousMission:
     
     def position_callback(self, timestamp, data, logconf_name):
         """Update position."""
-        self.current_x = data.get('stateEstimate.x', 0.0)
-        self.current_y = data.get('stateEstimate.y', 0.0)
-        self.current_z = data.get('stateEstimate.z', 0.0)
-        self.current_yaw = np.deg2rad(data.get('stabilizer.yaw', 0.0))
+        self.current_x = float(data.get('stateEstimate.x', 0.0))
+        self.current_y = float(data.get('stateEstimate.y', 0.0))
+        self.current_z = float(data.get('stateEstimate.z', 0.0))
+        self.current_yaw = float(np.deg2rad(data.get('stabilizer.yaw', 0.0)))
         
         if self.visualizer and self.visualizer.is_setup:
             self.visualizer.update_drone(self.current_x, self.current_y, self.current_yaw)
@@ -184,7 +184,7 @@ class AutonomousMission:
         
         self.waypoint_idx = 0
         if len(self.waypoints_x) > 0:
-            self.target_filter.reset(float(self.waypoints_x[0]), float(self.waypoints_y[0]))
+            self.target_filter.reset(float(self.waypoints_x[0].item()), float(self.waypoints_y[0].item()))
         else:
             self.target_filter.reset(to_pos[0], to_pos[1])
         return True
@@ -245,8 +245,60 @@ class AutonomousMission:
         self.visualizer.fig.canvas.mpl_connect('key_press_event', on_key_press)
         print('ℹ️  Press ESC to emergency stop')
     
-    def navigate_with_avoidance(self, target):
-        """Navigate to target with obstacle avoidance."""
+    def clear_map_and_visualization(self):
+        """Clear map and visualization for fresh start."""
+        print('🧹 Clearing map and visualization...')
+        
+        # Reset grid map
+        self.grid_map = GridMap(width=int(6.0/0.05), height=int(3.0/0.05),
+                               resolution=0.05, center_x=3.0, center_y=1.5)
+        self.grid_map.occupy_boundaries(boundary_width=5)
+        
+        # Clear visualization
+        if self.visualizer:
+            # Clear all dynamic artists
+            try:
+                for artist in list(self.visualizer.ax.lines):
+                    try:
+                        artist.remove()
+                    except:
+                        pass
+                for artist in list(self.visualizer.ax.collections):
+                    try:
+                        artist.remove()
+                    except:
+                        pass
+                for artist in list(self.visualizer.ax.texts):
+                    try:
+                        if hasattr(artist, 'get_text') and 'Center' in artist.get_text():
+                            artist.remove()
+                    except:
+                        pass
+                legend = self.visualizer.ax.get_legend()
+                if legend:
+                    try:
+                        legend.remove()
+                    except:
+                        pass
+            except Exception as e:
+                print(f'Warning: Error clearing visualization: {e}')
+            
+            # Reset visualizer state and redraw
+            self.visualizer.reset()
+            self.visualizer.setup(start=self.start, goal=self.goal, grid_map=self.grid_map)
+            
+            import matplotlib.pyplot as plt
+            plt.draw()
+            plt.pause(0.1)
+    
+    def navigate_with_avoidance(self, target, slow_mode=False, use_absolute_height=False):
+        """Navigate to target with obstacle avoidance.
+        
+        Args:
+            target: Target position (x, y)
+            slow_mode: If True, use slower speed for better detection
+            use_absolute_height: If True, use current_z instead of flight_height (for pad hover)
+        """
         self.process_detection()
         
         # Waypoint handling
@@ -260,10 +312,11 @@ class AutonomousMission:
                 target = (tx, ty)
         
         ftx, fty = self.target_filter.update(target[0], target[1])
+        cruise_speed = 0.15 if slow_mode else self.cruise_speed
         
         # Compute velocities
         vx_path_w, vy_path_w = compute_path_velocity(
-            (self.current_x, self.current_y), (ftx, fty), self.cruise_speed
+            (self.current_x, self.current_y), (ftx, fty), cruise_speed
         )
         vx_avoid_w, vy_avoid_w = compute_avoidance_velocity(
             self.sensor_readings, self.current_yaw, danger_dist=0.4, gain=0.5
@@ -281,9 +334,11 @@ class AutonomousMission:
         vx_w_f, vy_w_f = self.velocity_filter.update(vx_w, vy_w)
         vx_b, vy_b = world_to_body(vx_w_f, vy_w_f, self.current_yaw)
         
-        self.update_hover(vx=vx_b, vy=vy_b, yaw=0.0, height=self.flight_height)
+        # Use absolute height when over pad to prevent climbing
+        height_cmd = self.current_z if use_absolute_height else self.flight_height
+        self.update_hover(vx=vx_b, vy=vy_b, yaw=0.0, height=height_cmd)
         
-        # Update visualizer more frequently
+        # Update visualizer
         if self.visualizer and self.step_counter % 3 == 0:
             self.visualizer.update_repulsion(vx_avoid_w, vy_avoid_w)
             avoiding = np.hypot(vx_avoid_w, vy_avoid_w) > 0.02
@@ -375,42 +430,51 @@ class AutonomousMission:
             
             # PHASE 3: Search and land on pad at goal
             print('\n🔍 Searching for landing pad at goal...')
-            sweep = generate_sweep_pattern(self.goal, width=1.0, height=1.0, spacing=0.3)
-            
-            # Show sweep pattern on visualizer
-            if self.visualizer:
-                sweep_x = [wp[0] for wp in sweep]
-                sweep_y = [wp[1] for wp in sweep]
-                self.visualizer.ax.plot(sweep_x, sweep_y, 'c--', linewidth=1, alpha=0.5, label='Sweep Pattern')
-                self.visualizer.ax.scatter(sweep_x, sweep_y, c='cyan', s=30, alpha=0.6, marker='x')
-            
-            # Execute sweep with live visualization
             self.detector.start_detection(baseline_height=self.flight_height)
             pad_center = None
             
+            sweep = generate_sweep_pattern(self.goal, width=1.0, height=1.0, spacing=0.3)
+            sweep_with_dist = [(wp, np.hypot(wp[0] - self.current_x, wp[1] - self.current_y)) for wp in sweep]
+            sweep_with_dist.sort(key=lambda x: x[1])
+            sweep = [wp for wp, _ in sweep_with_dist]
+            
+            if self.visualizer:
+                sweep_x, sweep_y = [wp[0] for wp in sweep], [wp[1] for wp in sweep]
+                self.visualizer.ax.scatter(sweep_x, sweep_y, c='red', s=50, marker='o', 
+                                          alpha=0.7, label='Sweep Waypoints', zorder=5)
+                self.visualizer.render(force=True)
+            
             for i, sweep_target in enumerate(sweep):
-                print(f'Sweep waypoint {i+1}/{len(sweep)}: ({sweep_target[0]:.2f}, {sweep_target[1]:.2f})')
+                if self.emergency_stop:
+                    break
                 
-                # Plan path to sweep waypoint
-                self.plan_path((self.current_x, self.current_y), sweep_target, create_new_planner=False)
                 if self.visualizer:
-                    self.visualizer.update_path(self.waypoints_x, self.waypoints_y)
+                    self.visualizer.goal = sweep_target
                 
-                # Navigate to sweep waypoint with visualization
-                self.mission_active = True
-                while self.mission_active and not self.emergency_stop:
+                print(f'Sweep {i+1}/{len(sweep)}: ({sweep_target[0]:.2f}, {sweep_target[1]:.2f})')
+                
+                # Navigate with slow mode and absolute height to prevent climbing over pad
+                dist = np.hypot(self.current_x - sweep_target[0], self.current_y - sweep_target[1])
+                while dist > 0.1 and not self.emergency_stop:
                     self.update_sensors()
                     self.process_detection()
-                    
-                    dist = np.hypot(self.current_x - sweep_target[0], self.current_y - sweep_target[1])
-                    if dist < 0.1:
-                        break
-                    
-                    self.navigate_with_avoidance(sweep_target)
+                    self.navigate_with_avoidance(sweep_target, slow_mode=True, use_absolute_height=True)
                     self.step_counter += 1
+                    dist = np.hypot(self.current_x - sweep_target[0], self.current_y - sweep_target[1])
                     time.sleep(0.01)
                 
-                # Check if pad detected
+                # If first edge detected, switch to local search
+                if len(self.detector.peak_positions) == 1:
+                    first_edge = self.detector.peak_positions[0]['position']
+                    print(f'🎯 First edge found at ({first_edge[0]:.2f}, {first_edge[1]:.2f}), searching locally...')
+                    sweep = generate_sweep_pattern(first_edge, width=0.6, height=0.6, spacing=0.2)
+                    
+                    if self.visualizer:
+                        sweep_x, sweep_y = [wp[0] for wp in sweep], [wp[1] for wp in sweep]
+                        self.visualizer.ax.scatter(sweep_x, sweep_y, c='orange', s=50, marker='o', alpha=0.7, label='Local Sweep', zorder=5)
+                        self.visualizer.render(force=True)
+                
+                # Check if pad fully detected
                 if len(self.detector.peak_positions) >= 2:
                     center = self.detector.calculate_pad_center()
                     if center and self.detector.center_confidence > 0.45:
@@ -419,6 +483,10 @@ class AutonomousMission:
                         break
             
             self.detector.stop_detection()
+            
+            # Reset goal marker
+            if self.visualizer:
+                self.visualizer.goal = self.goal
             
             # Show detected edges and center
             if self.visualizer and len(self.detector.peak_positions) > 0:
@@ -440,9 +508,15 @@ class AutonomousMission:
                 import matplotlib.pyplot as plt
                 plt.pause(0.5)
             
+            # Store pad center as actual landing position for accurate return planning
+            goal_pad_center = None
             if pad_center:
+                # Landing pad is 0.1m high (known constant)
+                pad_height = 0.1
+                print(f'📏 Landing pad height: {pad_height:.3f}m')
                 land_on_pad(self.controller.cf.commander, (self.current_x, self.current_y),
-                           pad_center, self.flight_height, self.control_rate_hz)
+                           pad_center, self.flight_height, self.control_rate_hz, pad_height=pad_height)
+                goal_pad_center = pad_center
             else:
                 print('⚠️  No pad found, landing at current position')
             
@@ -450,7 +524,10 @@ class AutonomousMission:
             self.land(duration_s=2.0)
             print('✅ Landed at goal')
             
-            # PHASE 4: Wait and takeoff
+            # PHASE 4: Clear and prepare for return
+            self.clear_map_and_visualization()
+            
+            # Wait and takeoff
             print('\n⏸️  Waiting 5 seconds...')
             time.sleep(5.0)
             
@@ -459,8 +536,10 @@ class AutonomousMission:
             self.takeoff(duration_s=2.0)
             
             # PHASE 5: Return to start
-            print(f'\n🗺️  Planning return to start {self.start}...')
-            self.plan_path((self.current_x, self.current_y), self.start)
+            # Use pad center if available, otherwise current position
+            start_pos = goal_pad_center if goal_pad_center else (self.current_x, self.current_y)
+            print(f'\n🗺️  Planning return to start {self.start} from {start_pos}...')
+            self.plan_path(start_pos, self.start)
             
             if self.visualizer:
                 self.visualizer.goal = self.start
@@ -493,45 +572,54 @@ class AutonomousMission:
             
             # PHASE 6: Search and land on pad at start
             print('\n🔍 Searching for landing pad at start...')
-            self.detector.peak_positions.clear()  # Reset detector
+            self.detector.peak_positions.clear()
             self.detector.calculated_center = None
-            
-            sweep = generate_sweep_pattern(self.start, width=1.0, height=1.0, spacing=0.3)
-            
-            # Show sweep pattern on visualizer
-            if self.visualizer:
-                sweep_x = [wp[0] for wp in sweep]
-                sweep_y = [wp[1] for wp in sweep]
-                self.visualizer.ax.plot(sweep_x, sweep_y, 'm--', linewidth=1, alpha=0.5, label='Sweep Pattern (Start)')
-                self.visualizer.ax.scatter(sweep_x, sweep_y, c='magenta', s=30, alpha=0.6, marker='x')
-            
-            # Execute sweep with live visualization
             self.detector.start_detection(baseline_height=self.flight_height)
             pad_center = None
             
+            sweep = generate_sweep_pattern(self.start, width=1.0, height=1.0, spacing=0.3)
+            sweep_with_dist = [(wp, np.hypot(wp[0] - self.current_x, wp[1] - self.current_y)) for wp in sweep]
+            sweep_with_dist.sort(key=lambda x: x[1])
+            sweep = [wp for wp, _ in sweep_with_dist]
+            
+            if self.visualizer:
+                sweep_x, sweep_y = [wp[0] for wp in sweep], [wp[1] for wp in sweep]
+                self.visualizer.ax.scatter(sweep_x, sweep_y, c='red', s=50, marker='o', 
+                                          alpha=0.7, label='Sweep Waypoints (Start)', zorder=5)
+                self.visualizer.render(force=True)
+            
             for i, sweep_target in enumerate(sweep):
-                print(f'Sweep waypoint {i+1}/{len(sweep)}: ({sweep_target[0]:.2f}, {sweep_target[1]:.2f})')
+                if self.emergency_stop:
+                    break
                 
-                # Plan path to sweep waypoint
-                self.plan_path((self.current_x, self.current_y), sweep_target, create_new_planner=False)
                 if self.visualizer:
-                    self.visualizer.update_path(self.waypoints_x, self.waypoints_y)
+                    self.visualizer.goal = sweep_target
                 
-                # Navigate to sweep waypoint with visualization
-                self.mission_active = True
-                while self.mission_active and not self.emergency_stop:
+                print(f'Sweep {i+1}/{len(sweep)}: ({sweep_target[0]:.2f}, {sweep_target[1]:.2f})')
+                
+                # Navigate with slow mode and absolute height to prevent climbing over pad
+                dist = np.hypot(self.current_x - sweep_target[0], self.current_y - sweep_target[1])
+                while dist > 0.1 and not self.emergency_stop:
                     self.update_sensors()
                     self.process_detection()
-                    
-                    dist = np.hypot(self.current_x - sweep_target[0], self.current_y - sweep_target[1])
-                    if dist < 0.1:
-                        break
-                    
-                    self.navigate_with_avoidance(sweep_target)
+                    self.navigate_with_avoidance(sweep_target, slow_mode=True, use_absolute_height=True)
                     self.step_counter += 1
+                    dist = np.hypot(self.current_x - sweep_target[0], self.current_y - sweep_target[1])
                     time.sleep(0.01)
                 
-                # Check if pad detected
+                # If first edge detected, switch to local search
+                if len(self.detector.peak_positions) == 1:
+                    first_edge = self.detector.peak_positions[0]['position']
+                    print(f'🎯 First edge found at ({first_edge[0]:.2f}, {first_edge[1]:.2f}), searching locally...')
+                    sweep = generate_sweep_pattern(first_edge, width=0.6, height=0.6, spacing=0.2)
+                    
+                    if self.visualizer:
+                        sweep_x, sweep_y = [wp[0] for wp in sweep], [wp[1] for wp in sweep]
+                        self.visualizer.ax.scatter(sweep_x, sweep_y, c='orange', s=50, marker='o', 
+                                                  alpha=0.7, label='Local Sweep (Start)', zorder=5)
+                        self.visualizer.render(force=True)
+                
+                # Check if pad fully detected
                 if len(self.detector.peak_positions) >= 2:
                     center = self.detector.calculate_pad_center()
                     if center and self.detector.center_confidence > 0.45:
@@ -540,6 +628,10 @@ class AutonomousMission:
                         break
             
             self.detector.stop_detection()
+            
+            # Reset goal marker
+            if self.visualizer:
+                self.visualizer.goal = self.start
             
             # Show detected edges and center
             if self.visualizer and len(self.detector.peak_positions) > 0:
@@ -562,8 +654,11 @@ class AutonomousMission:
                 plt.pause(0.5)
             
             if pad_center:
+                # Landing pad is 0.1m high (known constant)
+                pad_height = 0.1
+                print(f'📏 Landing pad height: {pad_height:.3f}m')
                 land_on_pad(self.controller.cf.commander, (self.current_x, self.current_y),
-                           pad_center, self.flight_height, self.control_rate_hz)
+                           pad_center, self.flight_height, self.control_rate_hz, pad_height=pad_height)
             else:
                 print('⚠️  No pad found, landing at current position')
             

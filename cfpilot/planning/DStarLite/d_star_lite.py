@@ -234,8 +234,9 @@ class DStarLite:
         return 1
 
     def calculate_key(self, s: Node):
-        return (min(self.g[s.x][s.y], self.rhs[s.x][s.y]) + self.h(s)
-                + self.km, min(self.g[s.x][s.y], self.rhs[s.x][s.y]))
+        g_val = float(self.g[int(s.x)][int(s.y)])
+        rhs_val = float(self.rhs[int(s.x)][int(s.y)])
+        return (min(g_val, rhs_val) + self.h(s) + self.km, min(g_val, rhs_val))
 
     def is_valid(self, node: Node):
         """Check if node is within grid bounds"""
